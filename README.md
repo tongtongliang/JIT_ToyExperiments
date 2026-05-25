@@ -5,8 +5,9 @@ This project studies why denoising models succeed or fail under different output
 1. Hidden representation dimensionality, stability, and sampling after long training.
 2. Early gradient rank and principal-angle dynamics.
 3. Sampling-only architecture comparison with a Tiny 1D U-Net + AdaGN.
+4. Sampling-only architecture comparison with a small AdaLN-zero Transformer over 1D patches.
 
-The separation is intentional. The representation experiment needs sufficiently converged FCN models. The gradient experiment needs dense early-training diagnostics and should not be conflated with final sample quality. The U-Net experiment is sampling-only for now, because hidden-representation and gradient diagnostics for a U-Net require a separate hook design.
+The separation is intentional. The representation experiment needs sufficiently converged FCN models. The gradient experiment needs dense early-training diagnostics and should not be conflated with final sample quality. The U-Net and Transformer experiments are sampling-only for now, because hidden-representation and gradient diagnostics for non-FCN architectures require a separate hook design.
 
 The main hypothesis is that successful denoising corresponds to learning corruption-stable, data-dependent low-dimensional structure, while failing parameterizations write or chase high-dimensional noise directions.
 
@@ -33,11 +34,13 @@ The gradient-analysis script checks this factorization numerically when it recor
 ├── run_clean_jax_experiment.py          # Representation experiment CLI
 ├── run_gradient_analysis_experiment.py  # Gradient-analysis experiment CLI
 ├── run_unet1d_torch_experiment.py       # Tiny 1D U-Net + AdaGN sampling-only CLI
+├── run_transformer1d_torch_experiment.py # AdaLN-zero Transformer sampling-only CLI
 ├── 01_representation_dimension_and_stability.ipynb
 ├── 02_gradient_rank_and_angle.ipynb
 ├── results/clean_jax_representation/
 ├── results/clean_jax_gradient/
 ├── results/torch_unet1d_sampling/
+├── results/torch_transformer1d_sampling/
 └── old_notebooks_and_data/
 ```
 
@@ -195,3 +198,56 @@ Normalized noise variance of hidden representations under resampled corruption n
 Older notebooks, executed notebooks, historical PyTorch scripts, previous figures, and checkpoint files are preserved in `old_notebooks_and_data/`. They are not part of the clean main workflow, but remain available for comparison.
 
 The abandoned JAX U-Net prototype is archived under `old_notebooks_and_data/scripts/abandoned_jax_unet1d_20260525/`. It is kept for provenance, but the active U-Net path is `run_unet1d_torch_experiment.py`.
+
+## Tiny Transformer Runner
+
+Sampling-only architecture comparison with a simpler computation graph than the U-Net:
+
+```bash
+python run_transformer1d_torch_experiment.py \
+  --output-root results/torch_transformer1d_sampling \
+  --ambient-dim 512 \
+  --n-samples 8192 \
+  --patch-size 8 \
+  --dim 128 \
+  --depth 5 \
+  --heads 1 \
+  --mlp-width 512 \
+  --attention-impl torch \
+  --time-embed-dim 256 \
+  --time-width 256 \
+  --steps 100000 \
+  --batch-size 256 \
+  --loss-every 100 \
+  --print-every 1000 \
+  --lr 1e-4 \
+  --grad-clip-norm 1.0 \
+  --sample-n 2048 \
+  --sample-steps 100 \
+  --device auto \
+  --save-checkpoints
+```
+
+The default Transformer uses non-overlapping 1D patches:
+
+```text
+ambient dimension = 512
+patch size = 8
+patch count = 64
+Transformer width = 128
+attention heads = 1
+depth = 5
+MLP width = 512
+attention implementation = torch.nn.MultiheadAttention
+parameter count ~= 2.18M
+```
+
+Each block uses affine-free LayerNorm, AdaLN-zero shift/scale/gates from the time embedding, self-attention, and a token MLP. The default attention path uses `torch.nn.MultiheadAttention(batch_first=True)`, with `--attention-impl manual` available as a fallback. The final patch decoder is zero-initialized. Like the U-Net runner, this script saves loss curves, checkpoints, generated samples, sample point-cloud dimensions, and sample-quality metrics. It does not collect hidden-representation or gradient-rank diagnostics.
+
+Local MPS benchmark on the MacBook:
+
+```text
+100 training steps per prediction mode, batch size 256, D=512:
+wall time ~= 58 seconds including a small sampling pass
+projected 100k-step run over x/v/eps ~= 16-17 hours
+```
