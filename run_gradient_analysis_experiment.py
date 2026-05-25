@@ -1,0 +1,4 @@
+from clean_jax_exp.train_gradient import main
+
+if __name__ == "__main__":
+    main()

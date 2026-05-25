@@ -1,0 +1,31 @@
+# Python / Jupyter caches
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local plotting/font caches
+.mplconfig/
+.DS_Store
+
+# Experiment outputs and checkpoints
+results/
+old_notebooks_and_data/checkpoints/
+old_notebooks_and_data/executed_notebooks/
+old_notebooks_and_data/figures/
+old_notebooks_and_data/outputs_patch_generation/
+old_notebooks_and_data/outputs_patch_learning/
+old_notebooks_and_data/paper_panels_pdf/
+old_notebooks_and_data/pycache_latest/
+old_notebooks_and_data/reports/
+old_notebooks_and_data/results/
+
+# Archive is kept locally for provenance, but most historical artifacts are large.
+old_notebooks_and_data/notebooks/
+old_notebooks_and_data/scripts/
+old_notebooks_and_data/.DS_Store_root_snapshot
+
+# Local editor settings
+.cursor/
