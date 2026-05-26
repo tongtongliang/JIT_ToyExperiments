@@ -158,6 +158,65 @@ def ensure_sample_quality_metrics(
     return out
 
 
+def _top_pca_basis(x: np.ndarray, k: int = 2) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.float64)
+    arr = arr - arr.mean(axis=0, keepdims=True)
+    _, _, vh = np.linalg.svd(arr, full_matrices=False)
+    return vh[:k].T
+
+
+def _orthonormalize(x: np.ndarray) -> np.ndarray:
+    q, _ = np.linalg.qr(np.asarray(x, dtype=np.float64))
+    return q
+
+
+def _principal_angles_deg(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    qa = _orthonormalize(a)
+    qb = _orthonormalize(b)
+    s = np.linalg.svd(qa.T @ qb, full_matrices=False, compute_uv=False)
+    s = np.clip(s, 0.0, 1.0)
+    return np.degrees(np.arccos(s))
+
+
+def ensure_sample_subspace_metrics(run_dir: str | Path, *, force: bool = False) -> Path:
+    """Compare sample PCA subspaces against the true normalized 2D data plane.
+
+    The dataset is embedded as ``data_2d @ P.T`` and then coordinate-wise
+    normalized by ``std``. Therefore the true two-dimensional linear subspace in
+    training/sample coordinates is span(diag(1 / std) @ P), not span(P).
+    """
+    run_dir = Path(run_dir)
+    out = run_dir / "analysis" / "sample_subspace_metrics.csv"
+    if out.exists() and not force:
+        return out
+
+    sample_npz = np.load(run_dir / "analysis" / "samples.npz")
+    data_npz = np.load(run_dir / "training_data_snapshot.npz")
+    p = np.asarray(data_npz["P"], dtype=np.float64)
+    std = np.asarray(data_npz["std"], dtype=np.float64)
+    true_basis = _orthonormalize(p / std[:, None])
+
+    rows: list[dict[str, Any]] = []
+    clouds = {"training_data": np.asarray(data_npz["x0"], dtype=np.float32)}
+    for mode in MODES:
+        clouds[mode] = np.asarray(sample_npz[f"{mode}_highd"], dtype=np.float32)
+
+    for label, cloud in clouds.items():
+        sample_basis = _top_pca_basis(cloud, k=2)
+        angles = _principal_angles_deg(sample_basis, true_basis)
+        overlap = float(np.sum(np.cos(np.radians(angles)) ** 2) / 2.0)
+        rows.append({
+            "mode": label,
+            "angle1_deg": float(angles[0]),
+            "angle2_deg": float(angles[1]),
+            "mean_angle_deg": float(np.mean(angles)),
+            "max_angle_deg": float(np.max(angles)),
+            "subspace_overlap": overlap,
+        })
+    _write_csv(out, rows)
+    return out
+
+
 def ensure_representation_spectrum(run_dir: str | Path, *, force: bool = False) -> Path:
     """Save singular-value spectra for every hidden representation matrix."""
     run_dir = Path(run_dir)

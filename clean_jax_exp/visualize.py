@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from .posthoc_analysis import ensure_representation_spectrum, ensure_sample_quality_metrics
+from .posthoc_analysis import ensure_representation_spectrum, ensure_sample_quality_metrics, ensure_sample_subspace_metrics
 
 MODE_LABELS = {"x": "x-pred", "v": "v-pred", "eps": "eps-pred"}
 MODE_COLORS = {"x": "#0072B2", "v": "#009E73", "eps": "#D55E00"}
@@ -511,6 +511,49 @@ def plot_sample_metric(run_dir: str | Path, *, metric: str = "rank95", save_pdf:
     return path
 
 
+def plot_sample_subspace_metric(run_dir: str | Path, *, metric: str = "max_angle_deg", save_pdf: bool = False, show: bool = True):
+    setup_style()
+    run_dir = Path(run_dir)
+    ensure_sample_subspace_metrics(run_dir)
+    df = pd.read_csv(run_dir / "analysis" / "sample_subspace_metrics.csv")
+    sub = df[df["mode"].isin(MODES)]
+    labels = MODES
+    fig, ax = plt.subplots(figsize=(5.0, 3.6))
+    vals = [float(sub[sub["mode"] == mode][metric].iloc[0]) for mode in labels]
+    bars = ax.bar(
+        np.arange(len(labels)),
+        vals,
+        color=[MODE_COLORS[m] for m in labels],
+        edgecolor="black",
+        linewidth=0.6,
+        alpha=0.88,
+    )
+    for bar, mode in zip(bars, labels):
+        bar.set_hatch(MODE_HATCHES[mode])
+    ymax = max(vals) if vals else 1.0
+    ax.set_ylim(0, max(ymax * 1.2, ymax + 1e-9))
+    _annotate_bars(ax, bars, fmt="{:.1f}")
+    ax.set_xlabel("Prediction target")
+    ylabel = {
+        "max_angle_deg": "Max principal angle (deg)",
+        "mean_angle_deg": "Mean principal angle (deg)",
+        "angle1_deg": "Principal angle 1 (deg)",
+        "angle2_deg": "Principal angle 2 (deg)",
+        "subspace_overlap": "2D subspace overlap",
+    }.get(metric, metric)
+    ax.set_ylabel(ylabel)
+    ax.set_title("Sample PCA Subspace vs Ground 2D Plane", fontweight="bold")
+    ax.set_xticks(np.arange(len(labels)))
+    ax.set_xticklabels([MODE_LABELS[m] for m in labels], rotation=15, ha="right")
+    ax.grid(alpha=0.25, axis="y")
+    path = save_figure(fig, run_dir, f"sample_subspace_{metric}", save_pdf=save_pdf)
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return path
+
+
 def plot_matrix_metric(run_dir: str | Path, *, matrix_kind: str, layer: str, metric: str, save_pdf: bool = False, show: bool = True):
     setup_style()
     run_dir = Path(run_dir)
@@ -592,6 +635,7 @@ def generate_sampling_figures(run_dir: str | Path, *, save_pdf: bool = False, sh
         paths.append(plot_samples_pca3d(run_dir, mode=mode, save_pdf=save_pdf, show=show))
     for metric in ["rank95", "stable_rank"]:
         paths.append(plot_sample_metric(run_dir, metric=metric, save_pdf=save_pdf, show=show))
+    paths.append(plot_sample_subspace_metric(run_dir, metric="max_angle_deg", save_pdf=save_pdf, show=show))
     return paths
 
 
