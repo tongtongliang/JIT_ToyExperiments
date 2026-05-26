@@ -251,3 +251,30 @@ Local MPS benchmark on the MacBook:
 wall time ~= 58 seconds including a small sampling pass
 projected 100k-step run over x/v/eps ~= 16-17 hours
 ```
+
+Posthoc patch hidden-representation analysis for a completed Transformer run:
+
+```bash
+python analyze_transformer_hidden_representations.py \
+  --run-dir results/torch_transformer1d_sampling/runs/<run-name> \
+  --device cpu \
+  --n-eval 256 \
+  --t-values 0.1,0.3,0.5,0.7,0.9
+```
+
+This reads `x/v/eps` checkpoints, reuses the saved training data snapshot, and records patch point-cloud metrics for:
+
+```text
+patch_embed
+attention pre-norm stream
+attention norm output
+attention AdaLN fan-in
+MLP pre-norm stream
+MLP norm output
+MLP AdaLN fan-in
+final pre-norm stream
+final norm output
+final AdaLN fan-in
+```
+
+Rows are flattened over `(sample, patch)` and measured as width-dimensional point clouds. The output is saved to `analysis/transformer_patch_representation_metrics.csv`, with figures under `figures/transformer_hidden/`.
