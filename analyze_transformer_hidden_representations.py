@@ -254,7 +254,7 @@ def make_plots(args: argparse.Namespace):
     for stream in key_streams:
         for metric in ("stable_rank", "rank95"):
             paths.append(plot_metric_lines(run_dir, stream=stream, sampling="mixed", metric=metric, save_pdf=args.save_pdf))
-    for stream in ("attn_fanin", "mlp_fanin"):
+    for stream in ("attn_fanin", "mlp_fanin", "final_fanin"):
         if stream in set(args.streams.split(",")):
             for mode in MODES:
                 paths.append(plot_fixed_t_heatmap(run_dir, stream=stream, mode=mode, metric="stable_rank", save_pdf=args.save_pdf))
