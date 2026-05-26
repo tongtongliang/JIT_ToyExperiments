@@ -166,6 +166,23 @@ def count_params(model: nn.Module) -> int:
     return int(sum(p.numel() for p in model.parameters()))
 
 
+def config_from_checkpoint(checkpoint: dict[str, Any]) -> TorchTransformerConfig:
+    cfg = dict(checkpoint["model_config"])
+    allowed = TorchTransformerConfig.__dataclass_fields__.keys()
+    return TorchTransformerConfig(**{k: cfg[k] for k in allowed if k in cfg})
+
+
+def infer_step_offset(run_dir: Path) -> int:
+    loss_path = run_dir / "logs" / "loss.csv"
+    if not loss_path.exists():
+        return 0
+    with open(loss_path, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        return 0
+    return int(max(float(row["step"]) for row in rows if row.get("step")))
+
+
 def pred_to_velocity_torch(raw: torch.Tensor, z_t: torch.Tensor, t: torch.Tensor, mode: str, t_min: float):
     t_col = t[:, None].clamp_min(t_min)
     if mode == "v":
@@ -198,14 +215,33 @@ def loss_fn(model: TinyAdaLNTransformer1D, batch, mode: str, t_min: float):
     return F.mse_loss(v_pred, v_target)
 
 
-def train_mode(mode: str, init_state: dict[str, torch.Tensor], x0_all: torch.Tensor, model_cfg: TorchTransformerConfig, train_cfg: TorchTrainConfig, device: torch.device, seed: int):
+def train_mode(
+    mode: str,
+    init_state: dict[str, torch.Tensor] | None,
+    x0_all: torch.Tensor,
+    model_cfg: TorchTransformerConfig,
+    train_cfg: TorchTrainConfig,
+    device: torch.device,
+    seed: int,
+    *,
+    resume_checkpoint: dict[str, Any] | None = None,
+    step_offset: int = 0,
+):
     model = TinyAdaLNTransformer1D(model_cfg).to(device)
-    model.load_state_dict(init_state)
+    if resume_checkpoint is not None:
+        model.load_state_dict(resume_checkpoint["model"])
+    elif init_state is not None:
+        model.load_state_dict(init_state)
+    else:
+        raise ValueError("Either init_state or resume_checkpoint must be provided.")
     opt = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, betas=(train_cfg.beta1, train_cfg.beta2), eps=train_cfg.eps, weight_decay=train_cfg.weight_decay)
+    if resume_checkpoint is not None and "optimizer" in resume_checkpoint:
+        opt.load_state_dict(resume_checkpoint["optimizer"])
     generator = torch.Generator(device=device)
     generator.manual_seed(seed)
     rows = []
     for step in range(1, train_cfg.steps + 1):
+        global_step = step_offset + step
         opt.zero_grad(set_to_none=True)
         batch = make_batch(x0_all, train_cfg, generator, device)
         loss = loss_fn(model, batch, mode, train_cfg.t_min)
@@ -214,9 +250,13 @@ def train_mode(mode: str, init_state: dict[str, torch.Tensor], x0_all: torch.Ten
         clip_scale = min(1.0, train_cfg.grad_clip_norm / (float(grad_norm) + 1e-12))
         opt.step()
         if step == 1 or step % train_cfg.loss_every == 0 or step == train_cfg.steps:
-            rows.append({"mode": mode, "step": step, "loss": float(loss.detach().cpu()), "grad_norm": float(grad_norm), "clip_scale": clip_scale})
+            rows.append({"mode": mode, "step": global_step, "local_step": step, "loss": float(loss.detach().cpu()), "grad_norm": float(grad_norm), "clip_scale": clip_scale})
         if step == 1 or step % train_cfg.print_every == 0 or step == train_cfg.steps:
-            print(f"[{mode}] step {step:6d}/{train_cfg.steps} loss={float(loss.detach().cpu()):.6f} grad_norm={float(grad_norm):.4f} clip={clip_scale:.3f}", flush=True)
+            print(
+                f"[{mode}] step {global_step:6d} (+{step:5d}/{train_cfg.steps}) "
+                f"loss={float(loss.detach().cpu()):.6f} grad_norm={float(grad_norm):.4f} clip={clip_scale:.3f}",
+                flush=True,
+            )
     return model, opt, rows
 
 
@@ -269,23 +309,34 @@ def pick_device(requested: str) -> torch.device:
 def run_experiment(args: argparse.Namespace):
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
-    data_path, data = get_or_create_dataset(output_root, args.ambient_dim, args.n_samples, args.data_noise, args.seed)
     device = pick_device(args.device)
     if device.type == "cpu":
         torch.set_num_threads(args.num_threads)
 
-    model_cfg = TorchTransformerConfig(
-        ambient_dim=args.ambient_dim,
-        patch_size=args.patch_size,
-        dim=args.dim,
-        depth=args.depth,
-        heads=args.heads,
-        mlp_width=args.mlp_width,
-        time_embed_dim=args.time_embed_dim,
-        time_width=args.time_width,
-        zero_init_output=True,
-        attention_impl=args.attention_impl,
-    )
+    resume_run_dir = Path(args.resume_run_dir) if args.resume_run_dir else None
+    resume_checkpoints: dict[str, dict[str, Any]] = {}
+    if resume_run_dir is not None:
+        data_path = resume_run_dir / "training_data_snapshot.npz"
+        data = dict(np.load(data_path))
+        resume_step_offset = args.resume_step_offset if args.resume_step_offset is not None else infer_step_offset(resume_run_dir)
+        for mode in MODES:
+            resume_checkpoints[mode] = torch.load(resume_run_dir / "checkpoints" / f"{mode}_final.pt", map_location=device)
+        model_cfg = config_from_checkpoint(resume_checkpoints["x"])
+    else:
+        data_path, data = get_or_create_dataset(output_root, args.ambient_dim, args.n_samples, args.data_noise, args.seed)
+        resume_step_offset = 0
+        model_cfg = TorchTransformerConfig(
+            ambient_dim=args.ambient_dim,
+            patch_size=args.patch_size,
+            dim=args.dim,
+            depth=args.depth,
+            heads=args.heads,
+            mlp_width=args.mlp_width,
+            time_embed_dim=args.time_embed_dim,
+            time_width=args.time_width,
+            zero_init_output=True,
+            attention_impl=args.attention_impl,
+        )
     train_cfg = TorchTrainConfig(
         steps=args.steps,
         batch_size=args.batch_size,
@@ -298,11 +349,20 @@ def run_experiment(args: argparse.Namespace):
 
     torch.manual_seed(args.seed + 123)
     init_model = TinyAdaLNTransformer1D(model_cfg)
-    init_state = {k: v.detach().clone() for k, v in init_model.state_dict().items()}
+    init_state = None if resume_run_dir is not None else {k: v.detach().clone() for k, v in init_model.state_dict().items()}
     n_params = count_params(init_model)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = args.run_name or f"torch_transformer1d_D{args.ambient_dim}_adamw_p{args.patch_size}_d{args.dim}_h{args.heads}_L{args.depth}_m{args.mlp_width}_{args.attention_impl}_steps{args.steps}_seed{args.seed}_{ts}"
+    if args.run_name:
+        run_name = args.run_name
+    elif resume_run_dir is not None:
+        run_name = (
+            f"torch_transformer1d_resume_D{model_cfg.ambient_dim}_adamw_p{model_cfg.patch_size}_d{model_cfg.dim}"
+            f"_h{model_cfg.heads}_L{model_cfg.depth}_m{model_cfg.mlp_width}_{model_cfg.attention_impl}"
+            f"_from{resume_step_offset}_to{resume_step_offset + args.steps}_seed{args.seed}_{ts}"
+        )
+    else:
+        run_name = f"torch_transformer1d_D{args.ambient_dim}_adamw_p{args.patch_size}_d{args.dim}_h{args.heads}_L{args.depth}_m{args.mlp_width}_{args.attention_impl}_steps{args.steps}_seed{args.seed}_{ts}"
     run_dir = output_root / "runs" / run_name
     run_dir.mkdir(parents=True, exist_ok=False)
     (run_dir / "logs").mkdir(exist_ok=True)
@@ -323,6 +383,9 @@ def run_experiment(args: argparse.Namespace):
         "patch_count": args.ambient_dim // args.patch_size,
         "train_config": asdict(train_cfg),
         "analysis_config": asdict(analysis_cfg),
+        "resume_run_dir": str(resume_run_dir) if resume_run_dir is not None else None,
+        "resume_step_offset": resume_step_offset,
+        "resume_target_step": resume_step_offset + args.steps,
     }
     (run_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     np.savez_compressed(run_dir / "training_data_snapshot.npz", **data)
@@ -333,12 +396,30 @@ def run_experiment(args: argparse.Namespace):
     all_rows: list[dict[str, Any]] = []
     for mode in MODES:
         print(f"\n{'=' * 90}\nTorch Transformer1D training mode={mode}\n{'=' * 90}", flush=True)
-        model, opt, rows = train_mode(mode, init_state, x0_all, model_cfg, train_cfg, device, seed=args.seed + 1000)
+        model, opt, rows = train_mode(
+            mode,
+            init_state,
+            x0_all,
+            model_cfg,
+            train_cfg,
+            device,
+            seed=args.seed + 1000 + resume_step_offset,
+            resume_checkpoint=resume_checkpoints.get(mode),
+            step_offset=resume_step_offset,
+        )
         models[mode] = model
         all_rows.extend(rows)
         if args.save_checkpoints:
             torch.save(
-                {"mode": mode, "model": model.state_dict(), "optimizer": opt.state_dict(), "model_config": asdict(model_cfg), "train_config": asdict(train_cfg)},
+                {
+                    "mode": mode,
+                    "model": model.state_dict(),
+                    "optimizer": opt.state_dict(),
+                    "model_config": asdict(model_cfg),
+                    "train_config": asdict(train_cfg),
+                    "step": resume_step_offset + train_cfg.steps,
+                    "resume_run_dir": str(resume_run_dir) if resume_run_dir is not None else None,
+                },
                 run_dir / "checkpoints" / f"{mode}_final.pt",
             )
     write_csv(run_dir / "logs" / "loss.csv", all_rows)
@@ -375,6 +456,8 @@ def build_argparser():
     p.add_argument("--device", default="auto")
     p.add_argument("--num-threads", type=int, default=8)
     p.add_argument("--save-checkpoints", action="store_true")
+    p.add_argument("--resume-run-dir", default=None, help="Continue from a previous run directory containing checkpoints and training_data_snapshot.npz.")
+    p.add_argument("--resume-step-offset", type=int, default=None, help="Global step offset for resumed logs. Defaults to max step in the previous loss.csv.")
     return p
 
 
