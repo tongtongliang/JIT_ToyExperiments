@@ -118,11 +118,7 @@ def _sample_metric_box(ax, quality):
     if quality is None:
         return
     space_label = "2D" if quality.get("space") == "projected_2d" else "ambient"
-    text = (
-        f"Chamfer ({space_label}): {_format_quality(float(quality['chamfer']))}\n"
-        f"Precision ({space_label}): {float(quality['precision']):.2f}\n"
-        f"Recall ({space_label}): {float(quality['recall']):.2f}"
-    )
+    text = f"Chamfer ({space_label}): {_format_quality(float(quality['chamfer']))}"
     text_fn = ax.text2D if getattr(ax, "name", "") == "3d" and hasattr(ax, "text2D") else ax.text
     text_fn(
         0.035,
@@ -346,7 +342,7 @@ def plot_samples(
     run_dir: str | Path,
     *,
     mode: str,
-    quality_space: str = "projected_2d",
+    quality_space: str = "ambient_highd",
     save_pdf: bool = False,
     show: bool = True,
 ):
