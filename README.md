@@ -278,3 +278,61 @@ final AdaLN fan-in
 ```
 
 Rows are flattened over `(sample, patch)` and measured as width-dimensional point clouds. The output is saved to `analysis/transformer_patch_representation_metrics.csv`, with grouped bar-chart figures under `figures/transformer_hidden_bars/`. The default plots combine attention and MLP into 10 Transformer sublayers (`B0 Attn`, `B0 MLP`, ..., `B4 MLP`) so the layout matches the FCN representation notebook.
+
+## Tiny MLP-Mixer Runner
+
+Sampling-only architecture comparison that keeps the Transformer patchification, embedding width, AdaLN-zero conditioning, and final patch decoder, but replaces each attention block with an MLP-Mixer block:
+
+```bash
+python run_mixer1d_torch_experiment.py \
+  --output-root results/torch_mixer1d_sampling \
+  --ambient-dim 512 \
+  --n-samples 8192 \
+  --patch-size 8 \
+  --dim 128 \
+  --depth 5 \
+  --token-mlp-width 128 \
+  --channel-mlp-width 512 \
+  --time-embed-dim 256 \
+  --time-width 256 \
+  --steps 100000 \
+  --batch-size 256 \
+  --loss-every 100 \
+  --print-every 1000 \
+  --lr 1e-4 \
+  --grad-clip-norm 1.0 \
+  --sample-n 2048 \
+  --sample-steps 100 \
+  --device auto \
+  --save-checkpoints
+```
+
+The default Mixer uses:
+
+```text
+ambient dimension = 512
+patch size = 8
+patch count = 64
+Mixer width = 128
+depth = 5
+token-mixing MLP hidden width = 128
+channel-mixing MLP hidden width = 512
+parameter count ~= 1.94M
+parameter count excluding AdaLN/time ~= 0.75M
+```
+
+Parameter count comparison for D=512:
+
+| model | total params | excluding AdaLN/time |
+|---|---:|---:|
+| FCN width=256 depth=5 | 2.04M | 0.92M |
+| Transformer d=128 depth=5 | 2.18M | 1.00M |
+| MLP-Mixer d=128 depth=5 | 1.94M | 0.75M |
+
+Local MPS benchmark on the MacBook:
+
+```text
+100 training steps per prediction mode, batch size 256, D=512:
+wall time ~= 44 seconds including a small sampling pass
+projected 10k-step run over x/v/eps ~= 1.2-1.5 hours
+```
