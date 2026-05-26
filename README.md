@@ -277,4 +277,4 @@ final norm output
 final AdaLN fan-in
 ```
 
-Rows are flattened over `(sample, patch)` and measured as width-dimensional point clouds. The output is saved to `analysis/transformer_patch_representation_metrics.csv`, with figures under `figures/transformer_hidden/`.
+Rows are flattened over `(sample, patch)` and measured as width-dimensional point clouds. The output is saved to `analysis/transformer_patch_representation_metrics.csv`, with figures under `figures/transformer_hidden_layerwise/`.

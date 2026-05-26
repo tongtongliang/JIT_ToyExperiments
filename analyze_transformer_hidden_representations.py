@@ -33,6 +33,23 @@ STREAM_LABELS = {
     "final_fanin": "Final AdaLN Fan-In",
 }
 
+T_COLORS = {
+    "mixed": "#000000",
+    "t=0.1": "#0072B2",
+    "t=0.3": "#56B4E9",
+    "t=0.5": "#009E73",
+    "t=0.7": "#E69F00",
+    "t=0.9": "#D55E00",
+}
+T_MARKERS = {
+    "mixed": "o",
+    "t=0.1": "o",
+    "t=0.3": "s",
+    "t=0.5": "^",
+    "t=0.7": "D",
+    "t=0.9": "v",
+}
+
 
 def write_csv(path: Path, rows: list[dict[str, Any]]):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -188,7 +205,7 @@ def analyze_run(args: argparse.Namespace):
 
 
 def _save(fig, run_dir: Path, name: str, *, save_pdf: bool):
-    fig_dir = run_dir / "figures" / "transformer_hidden"
+    fig_dir = run_dir / "figures" / "transformer_hidden_layerwise"
     fig_dir.mkdir(parents=True, exist_ok=True)
     path = fig_dir / f"{name}.png"
     fig.savefig(path, dpi=220, bbox_inches="tight")
@@ -196,6 +213,14 @@ def _save(fig, run_dir: Path, name: str, *, save_pdf: bool):
         fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
     return path
+
+
+def _csv_list(text: str):
+    return [x.strip() for x in text.split(",") if x.strip()]
+
+
+def _metric_ylabel(metric: str):
+    return "Stable rank" if metric == "stable_rank" else "95% PCA rank"
 
 
 def plot_metric_lines(run_dir: Path, *, stream: str, sampling: str, metric: str, save_pdf: bool):
@@ -207,6 +232,8 @@ def plot_metric_lines(run_dir: Path, *, stream: str, sampling: str, metric: str,
     fig, ax = plt.subplots(figsize=(5.4, 4.0))
     for mode in MODES:
         m = sub[sub["mode"] == mode].sort_values("layer")
+        if m.empty:
+            continue
         ax.plot(
             m["layer"],
             m[metric],
@@ -217,12 +244,41 @@ def plot_metric_lines(run_dir: Path, *, stream: str, sampling: str, metric: str,
             label=MODE_LABELS[mode],
         )
     ax.set_xlabel("Transformer layer")
-    ax.set_ylabel("Stable rank" if metric == "stable_rank" else "95% PCA rank")
+    ax.set_ylabel(_metric_ylabel(metric))
     ax.set_title(f"{STREAM_LABELS.get(stream, stream)} · {sampling}", fontweight="bold")
     ax.grid(alpha=0.25)
     ax.legend(frameon=True, facecolor="white", framealpha=0.82, edgecolor="0.85", loc="best")
     safe = sampling.replace("=", "").replace(".", "p")
     return _save(fig, run_dir, f"patch_{stream}_{safe}_{metric}", save_pdf=save_pdf)
+
+
+def plot_time_lines(run_dir: Path, *, stream: str, mode: str, metric: str, samplings: list[str], save_pdf: bool):
+    setup_style()
+    df = pd.read_csv(run_dir / "analysis" / "transformer_patch_representation_metrics.csv")
+    sub = df[(df["stream"] == stream) & (df["mode"] == mode)].copy()
+    if sub.empty:
+        raise ValueError(f"No rows for stream={stream}, mode={mode}")
+    fig, ax = plt.subplots(figsize=(5.4, 4.0))
+    for sampling in samplings:
+        m = sub[sub["sampling"] == sampling].sort_values("layer")
+        if m.empty:
+            continue
+        ax.plot(
+            m["layer"],
+            m[metric],
+            marker=T_MARKERS.get(sampling, "o"),
+            color=T_COLORS.get(sampling, "0.35"),
+            linewidth=2.0 if sampling != "mixed" else 2.4,
+            linestyle="--" if sampling == "mixed" else "-",
+            markersize=5.0,
+            label=sampling,
+        )
+    ax.set_xlabel("Transformer layer")
+    ax.set_ylabel(_metric_ylabel(metric))
+    ax.set_title(f"{MODE_LABELS[mode]} · {STREAM_LABELS.get(stream, stream)}", fontweight="bold")
+    ax.grid(alpha=0.25)
+    ax.legend(frameon=True, facecolor="white", framealpha=0.82, edgecolor="0.85", loc="best")
+    return _save(fig, run_dir, f"patch_{mode}_{stream}_by_t_{metric}", save_pdf=save_pdf)
 
 
 def plot_fixed_t_heatmap(run_dir: Path, *, stream: str, mode: str, metric: str, save_pdf: bool):
@@ -250,12 +306,20 @@ def plot_fixed_t_heatmap(run_dir: Path, *, stream: str, mode: str, metric: str, 
 def make_plots(args: argparse.Namespace):
     run_dir = Path(args.run_dir)
     paths = []
-    key_streams = [s for s in ("attn_pre_norm", "attn_fanin", "mlp_pre_norm", "mlp_fanin", "final_fanin") if s in set(args.streams.split(","))]
-    for stream in key_streams:
+    df = pd.read_csv(run_dir / "analysis" / "transformer_patch_representation_metrics.csv")
+    available_streams = set(df["stream"].unique())
+    plot_streams = [s for s in _csv_list(args.plot_streams) if s in available_streams]
+    samplings = ["mixed"] + sorted([s for s in df["sampling"].unique() if s != "mixed"], key=lambda x: float(x.replace("t=", "")))
+
+    for stream in plot_streams:
         for metric in ("stable_rank", "rank95"):
-            paths.append(plot_metric_lines(run_dir, stream=stream, sampling="mixed", metric=metric, save_pdf=args.save_pdf))
-    for stream in ("attn_fanin", "mlp_fanin", "final_fanin"):
-        if stream in set(args.streams.split(",")):
+            for sampling in samplings:
+                paths.append(plot_metric_lines(run_dir, stream=stream, sampling=sampling, metric=metric, save_pdf=args.save_pdf))
+            for mode in MODES:
+                paths.append(plot_time_lines(run_dir, stream=stream, mode=mode, metric=metric, samplings=samplings, save_pdf=args.save_pdf))
+
+    if args.plot_heatmaps:
+        for stream in plot_streams:
             for mode in MODES:
                 paths.append(plot_fixed_t_heatmap(run_dir, stream=stream, mode=mode, metric="stable_rank", save_pdf=args.save_pdf))
                 paths.append(plot_fixed_t_heatmap(run_dir, stream=stream, mode=mode, metric="rank95", save_pdf=args.save_pdf))
@@ -274,6 +338,12 @@ def build_argparser():
         "--streams",
         default="patch_embed,attn_pre_norm,attn_norm,attn_fanin,mlp_pre_norm,mlp_norm,mlp_fanin,final_pre_norm,final_norm,final_fanin",
     )
+    p.add_argument(
+        "--plot-streams",
+        default="attn_pre_norm,attn_norm,attn_fanin,mlp_pre_norm,mlp_norm,mlp_fanin",
+        help="Comma-separated streams to visualize as layer-wise plots. Defaults exclude final-only streams.",
+    )
+    p.add_argument("--plot-heatmaps", action="store_true", help="Optional diagnostic heatmaps; off by default because line plots are easier to compare layer-wise.")
     p.add_argument("--skip-analysis", action="store_true")
     p.add_argument("--skip-plots", action="store_true")
     p.add_argument("--save-pdf", action="store_true")
