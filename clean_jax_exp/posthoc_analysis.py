@@ -93,10 +93,8 @@ def _self_nn_radius(x: np.ndarray, *, quantile: float, chunk_size: int = 256) ->
     return float(np.quantile(nn, quantile))
 
 
-def _sample_quality_one(train: np.ndarray, gen: np.ndarray, *, radius_quantile: float, train_max: int, seed: int) -> dict[str, float]:
-    train_eval = _subsample_rows(train, train_max, seed)
+def _sample_quality_one(train_eval: np.ndarray, gen: np.ndarray, *, radius: float) -> dict[str, float]:
     gen_eval = np.asarray(gen, dtype=np.float32)
-    radius = _self_nn_radius(train_eval, quantile=radius_quantile)
     gen_to_train = _nearest_distances(gen_eval, train_eval)
     train_to_gen = _nearest_distances(train_eval, gen_eval)
     return {
@@ -137,20 +135,23 @@ def ensure_sample_quality_metrics(
         ("ambient_highd", data_npz["x0"], highd_train_max),
     ]
     for space, train, train_max in spaces:
+        # Use one data subset and one data-scale radius per space, shared by all
+        # prediction modes. Otherwise precision/recall are not directly
+        # comparable across x/v/eps.
+        train_eval = _subsample_rows(train, train_max, seed=71_000)
+        radius = _self_nn_radius(train_eval, quantile=radius_quantile)
         for mode_idx, mode in enumerate(MODES):
             key = f"{mode}_2d" if space == "projected_2d" else f"{mode}_highd"
             metrics = _sample_quality_one(
-                train,
+                train_eval,
                 sample_npz[key],
-                radius_quantile=radius_quantile,
-                train_max=train_max,
-                seed=71_000 + mode_idx,
+                radius=radius,
             )
             rows.append({
                 "mode": mode,
                 "space": space,
                 "radius_quantile": radius_quantile,
-                "train_points": min(int(train.shape[0]), train_max),
+                "train_points": int(train_eval.shape[0]),
                 **metrics,
             })
     _write_csv(out, rows)
