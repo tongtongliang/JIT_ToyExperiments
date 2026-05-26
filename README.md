@@ -277,4 +277,4 @@ final norm output
 final AdaLN fan-in
 ```
 
-Rows are flattened over `(sample, patch)` and measured as width-dimensional point clouds. The output is saved to `analysis/transformer_patch_representation_metrics.csv`, with figures under `figures/transformer_hidden_layerwise/`.
+Rows are flattened over `(sample, patch)` and measured as width-dimensional point clouds. The output is saved to `analysis/transformer_patch_representation_metrics.csv`, with grouped bar-chart figures under `figures/transformer_hidden_bars/`. The default plots combine attention and MLP into 10 Transformer sublayers (`B0 Attn`, `B0 MLP`, ..., `B4 MLP`) so the layout matches the FCN representation notebook.

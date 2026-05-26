@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 
 from clean_jax_exp.metrics import spectral_metrics
-from clean_jax_exp.visualize import MODE_COLORS, MODE_LABELS, MODE_MARKERS, MODES, setup_style
+from clean_jax_exp.visualize import MODE_COLORS, MODE_HATCHES, MODE_LABELS, MODE_MARKERS, MODES, setup_style
 from run_transformer1d_torch_experiment import TorchTransformerConfig, TinyAdaLNTransformer1D, modulate
 
 
@@ -31,6 +31,17 @@ STREAM_LABELS = {
     "final_pre_norm": "Final Pre-Norm Stream",
     "final_norm": "Final Norm Output",
     "final_fanin": "Final AdaLN Fan-In",
+}
+
+STAGE_STREAMS = {
+    "pre_norm": ("attn_pre_norm", "mlp_pre_norm"),
+    "norm": ("attn_norm", "mlp_norm"),
+    "fanin": ("attn_fanin", "mlp_fanin"),
+}
+STAGE_LABELS = {
+    "pre_norm": "Pre-Norm Stream",
+    "norm": "Norm Output",
+    "fanin": "AdaLN Fan-In",
 }
 
 T_COLORS = {
@@ -205,7 +216,7 @@ def analyze_run(args: argparse.Namespace):
 
 
 def _save(fig, run_dir: Path, name: str, *, save_pdf: bool):
-    fig_dir = run_dir / "figures" / "transformer_hidden_layerwise"
+    fig_dir = run_dir / "figures" / "transformer_hidden_bars"
     fig_dir.mkdir(parents=True, exist_ok=True)
     path = fig_dir / f"{name}.png"
     fig.savefig(path, dpi=220, bbox_inches="tight")
@@ -221,6 +232,115 @@ def _csv_list(text: str):
 
 def _metric_ylabel(metric: str):
     return "Stable rank" if metric == "stable_rank" else "95% PCA rank"
+
+
+def _sampling_title(sampling: str):
+    return "Mixed t" if sampling == "mixed" else f"Fixed {sampling}"
+
+
+def _annotate_bars(ax, bars, *, fmt: str):
+    ymin, ymax = ax.get_ylim()
+    span = ymax - ymin
+    for bar in bars:
+        height = float(bar.get_height())
+        if not np.isfinite(height):
+            continue
+        ax.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            height + 0.018 * span,
+            fmt.format(height),
+            ha="center",
+            va="bottom",
+            fontsize=7,
+            rotation=90,
+        )
+
+
+def _legend_top_row_inside(ax, *, ncol: int = 3):
+    ax.legend(
+        frameon=True,
+        facecolor="white",
+        framealpha=0.76,
+        edgecolor="0.85",
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.985),
+        ncol=ncol,
+        borderpad=0.25,
+        labelspacing=0.25,
+        handletextpad=0.45,
+        columnspacing=1.0,
+    )
+
+
+def _combined_stage_table(df: pd.DataFrame, *, stage: str, sampling: str, metric: str):
+    attn_stream, mlp_stream = STAGE_STREAMS[stage]
+    rows = []
+    layers = sorted(df[df["stream"].isin([attn_stream, mlp_stream])]["layer"].unique())
+    for layer in layers:
+        if layer < 0:
+            continue
+        for stream, suffix in ((attn_stream, "Attn"), (mlp_stream, "MLP")):
+            sublayer_idx = int(layer) * 2 + (0 if suffix == "Attn" else 1)
+            label = f"B{int(layer)}\n{suffix}"
+            rows.append((layer, stream, sublayer_idx, label))
+    values = []
+    for layer, stream, sublayer_idx, label in rows:
+        entry = {"sublayer": sublayer_idx, "label": label}
+        for mode in MODES:
+            m = df[(df["stream"] == stream) & (df["sampling"] == sampling) & (df["mode"] == mode) & (df["layer"] == layer)]
+            entry[mode] = float(m[metric].iloc[0]) if not m.empty else np.nan
+        values.append(entry)
+    return pd.DataFrame(values).sort_values("sublayer")
+
+
+def plot_combined_stage_bar(run_dir: Path, *, stage: str, sampling: str, metric: str, save_pdf: bool):
+    setup_style()
+    df = pd.read_csv(run_dir / "analysis" / "transformer_patch_representation_metrics.csv")
+    table = _combined_stage_table(df, stage=stage, sampling=sampling, metric=metric)
+    if table.empty:
+        raise ValueError(f"No combined rows for stage={stage}, sampling={sampling}")
+    x = np.arange(len(table), dtype=float)
+    width = 0.23
+    fig, ax = plt.subplots(figsize=(11.8, 4.8))
+    all_bars = []
+    all_vals = []
+    for i, mode in enumerate(MODES):
+        vals = table[mode].to_numpy(dtype=float)
+        all_vals.extend([v for v in vals if np.isfinite(v)])
+        bars = ax.bar(
+            x + (i - 1) * width,
+            vals,
+            width=width,
+            color=MODE_COLORS[mode],
+            edgecolor="black",
+            linewidth=0.6,
+            hatch=MODE_HATCHES[mode],
+            label=MODE_LABELS[mode],
+            alpha=0.88,
+        )
+        all_bars.extend(bars)
+    ymax = max(all_vals) if all_vals else 1.0
+    if metric == "rank95":
+        y_top = min(140.0, max(5.0, float(np.ceil(ymax * 1.24 + 8.0))))
+        if y_top <= ymax:
+            y_top = ymax + 8.0
+        fmt = "{:.0f}"
+    else:
+        y_top = max(ymax * 1.30, ymax + 0.8)
+        fmt = "{:.2f}"
+    ax.set_ylim(0, y_top)
+    _annotate_bars(ax, all_bars, fmt=fmt)
+    ax.set_xlabel("Transformer sublayer")
+    ax.set_ylabel(_metric_ylabel(metric))
+    ax.set_title(f"Patch Hidden {_metric_ylabel(metric)}\n{STAGE_LABELS[stage]}, {_sampling_title(sampling)}", fontweight="bold", pad=8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(table["label"].tolist(), fontsize=10)
+    for boundary in np.arange(1.5, len(table) - 1, 2.0):
+        ax.axvline(boundary, color="0.82", linewidth=0.8, alpha=0.75)
+    ax.grid(alpha=0.25, axis="y")
+    _legend_top_row_inside(ax, ncol=3)
+    safe = sampling.replace("=", "").replace(".", "p")
+    return _save(fig, run_dir, f"patch_combined_{stage}_{safe}_{metric}", save_pdf=save_pdf)
 
 
 def plot_metric_lines(run_dir: Path, *, stream: str, sampling: str, metric: str, save_pdf: bool):
@@ -307,22 +427,31 @@ def make_plots(args: argparse.Namespace):
     run_dir = Path(args.run_dir)
     paths = []
     df = pd.read_csv(run_dir / "analysis" / "transformer_patch_representation_metrics.csv")
-    available_streams = set(df["stream"].unique())
-    plot_streams = [s for s in _csv_list(args.plot_streams) if s in available_streams]
     samplings = ["mixed"] + sorted([s for s in df["sampling"].unique() if s != "mixed"], key=lambda x: float(x.replace("t=", "")))
 
-    for stream in plot_streams:
+    plot_stages = [s for s in _csv_list(args.plot_stages) if s in STAGE_STREAMS]
+    for stage in plot_stages:
         for metric in ("stable_rank", "rank95"):
             for sampling in samplings:
-                paths.append(plot_metric_lines(run_dir, stream=stream, sampling=sampling, metric=metric, save_pdf=args.save_pdf))
-            for mode in MODES:
-                paths.append(plot_time_lines(run_dir, stream=stream, mode=mode, metric=metric, samplings=samplings, save_pdf=args.save_pdf))
+                paths.append(plot_combined_stage_bar(run_dir, stage=stage, sampling=sampling, metric=metric, save_pdf=args.save_pdf))
+
+    if args.plot_lines:
+        available_streams = set(df["stream"].unique())
+        plot_streams = [s for s in _csv_list(args.plot_streams) if s in available_streams]
+        for stream in plot_streams:
+            for metric in ("stable_rank", "rank95"):
+                for sampling in samplings:
+                    paths.append(plot_metric_lines(run_dir, stream=stream, sampling=sampling, metric=metric, save_pdf=args.save_pdf))
+                for mode in MODES:
+                    paths.append(plot_time_lines(run_dir, stream=stream, mode=mode, metric=metric, samplings=samplings, save_pdf=args.save_pdf))
 
     if args.plot_heatmaps:
+        available_streams = set(df["stream"].unique())
+        plot_streams = [s for s in _csv_list(args.plot_streams) if s in available_streams]
         for stream in plot_streams:
             for mode in MODES:
-                paths.append(plot_fixed_t_heatmap(run_dir, stream=stream, mode=mode, metric="stable_rank", save_pdf=args.save_pdf))
-                paths.append(plot_fixed_t_heatmap(run_dir, stream=stream, mode=mode, metric="rank95", save_pdf=args.save_pdf))
+                for metric in ("stable_rank", "rank95"):
+                    paths.append(plot_fixed_t_heatmap(run_dir, stream=stream, mode=mode, metric=metric, save_pdf=args.save_pdf))
     print("\n".join(str(p) for p in paths), flush=True)
 
 
@@ -341,9 +470,15 @@ def build_argparser():
     p.add_argument(
         "--plot-streams",
         default="attn_pre_norm,attn_norm,attn_fanin,mlp_pre_norm,mlp_norm,mlp_fanin",
-        help="Comma-separated streams to visualize as layer-wise plots. Defaults exclude final-only streams.",
+        help="Comma-separated streams to visualize when --plot-lines or --plot-heatmaps is set.",
     )
-    p.add_argument("--plot-heatmaps", action="store_true", help="Optional diagnostic heatmaps; off by default because line plots are easier to compare layer-wise.")
+    p.add_argument(
+        "--plot-stages",
+        default="pre_norm,norm,fanin",
+        help="Comma-separated combined stages to visualize as 10-sublayer grouped bar charts.",
+    )
+    p.add_argument("--plot-lines", action="store_true", help="Optional diagnostic line plots; off by default.")
+    p.add_argument("--plot-heatmaps", action="store_true", help="Optional diagnostic heatmaps; off by default.")
     p.add_argument("--skip-analysis", action="store_true")
     p.add_argument("--skip-plots", action="store_true")
     p.add_argument("--save-pdf", action="store_true")
