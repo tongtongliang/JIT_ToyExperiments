@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import numpy as np
 import torch
@@ -15,7 +20,7 @@ import torch.nn.functional as F
 from clean_jax_exp.data import get_or_create_dataset, project_to_2d
 from clean_jax_exp.metrics import spectral_metrics
 from clean_jax_exp.posthoc_analysis import ensure_sample_quality_metrics
-from run_transformer1d_torch_experiment import (
+from scripts.architectures.run_transformer1d_torch_experiment import (
     MODES,
     TorchAnalysisConfig,
     TorchTrainConfig,

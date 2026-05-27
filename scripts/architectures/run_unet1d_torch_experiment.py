@@ -4,10 +4,16 @@ import argparse
 import csv
 import json
 import math
+import pickle
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import numpy as np
 import torch
@@ -22,17 +28,18 @@ MODES = ("x", "v", "eps")
 
 
 @dataclass(frozen=True)
-class TorchTransformerConfig:
+class TorchUNetConfig:
     ambient_dim: int = 512
-    patch_size: int = 8
-    dim: int = 128
-    depth: int = 5
-    heads: int = 1
-    mlp_width: int = 512
+    patch_size: int = 4
+    stride: int = 2
+    base_channels: int = 56
+    channel_mults: tuple[int, int, int] = (1, 2, 3)
+    blocks_per_level: int = 2
+    kernel_size: int = 3
     time_embed_dim: int = 256
     time_width: int = 256
+    groups: int = 8
     zero_init_output: bool = True
-    attention_impl: str = "torch"
 
 
 @dataclass(frozen=True)
@@ -75,112 +82,137 @@ def sinusoidal_embedding(t: torch.Tensor, dim: int):
     return torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
 
 
-def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor):
-    return x * (1.0 + scale[:, None, :]) + shift[:, None, :]
-
-
-class AdaLNTransformerBlock(nn.Module):
-    def __init__(self, cfg: TorchTransformerConfig):
+class ResAdaGNBlock(nn.Module):
+    def __init__(self, in_ch: int, out_ch: int, cfg: TorchUNetConfig):
         super().__init__()
-        if cfg.dim % cfg.heads != 0:
-            raise ValueError("dim must be divisible by heads")
-        self.cfg = cfg
-        self.norm_attn = nn.LayerNorm(cfg.dim, elementwise_affine=False)
-        self.norm_mlp = nn.LayerNorm(cfg.dim, elementwise_affine=False)
-        self.ada = nn.Linear(cfg.time_width, 6 * cfg.dim)
-        if cfg.attention_impl == "torch":
-            self.attn = nn.MultiheadAttention(cfg.dim, cfg.heads, dropout=0.0, batch_first=True)
-        elif cfg.attention_impl == "manual":
-            self.qkv = nn.Linear(cfg.dim, 3 * cfg.dim)
-            self.attn_out = nn.Linear(cfg.dim, cfg.dim)
-        else:
-            raise ValueError("attention_impl must be 'torch' or 'manual'")
-        self.mlp0 = nn.Linear(cfg.dim, cfg.mlp_width)
-        self.mlp1 = nn.Linear(cfg.mlp_width, cfg.dim)
+        pad = cfg.kernel_size // 2
+        self.conv0 = nn.Conv1d(in_ch, out_ch, cfg.kernel_size, padding=pad)
+        self.norm = nn.GroupNorm(num_groups=min(cfg.groups, out_ch), num_channels=out_ch)
+        self.ada = nn.Linear(cfg.time_width, 2 * out_ch)
+        self.conv1 = nn.Conv1d(out_ch, out_ch, cfg.kernel_size, padding=pad)
+        self.norm1 = nn.GroupNorm(num_groups=min(cfg.groups, out_ch), num_channels=out_ch)
+        self.skip = nn.Identity() if in_ch == out_ch else nn.Conv1d(in_ch, out_ch, 1)
         nn.init.zeros_(self.ada.weight)
         nn.init.zeros_(self.ada.bias)
 
-    def attention(self, x: torch.Tensor):
-        if self.cfg.attention_impl == "torch":
-            out, _ = self.attn(x, x, x, need_weights=False)
-            return out
-        b, n, d = x.shape
-        h = self.cfg.heads
-        head_dim = d // h
-        qkv = self.qkv(x).reshape(b, n, 3, h, head_dim).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
-        logits = (q @ k.transpose(-2, -1)) * (head_dim ** -0.5)
-        attn = logits.softmax(dim=-1)
-        out = (attn @ v).transpose(1, 2).reshape(b, n, d)
-        return self.attn_out(out)
-
     def forward(self, x: torch.Tensor, t_cond: torch.Tensor):
-        shift_a, scale_a, gate_a, shift_m, scale_m, gate_m = self.ada(t_cond).chunk(6, dim=-1)
-        h = modulate(self.norm_attn(x), shift_a, scale_a)
-        x = x + gate_a[:, None, :] * self.attention(h)
-        h = modulate(self.norm_mlp(x), shift_m, scale_m)
-        x = x + gate_m[:, None, :] * self.mlp1(F.gelu(self.mlp0(h)))
-        return x
+        skip = self.skip(x)
+        h = self.conv0(x)
+        h = self.norm(h)
+        gamma, beta = self.ada(t_cond).chunk(2, dim=-1)
+        h = h * (1.0 + gamma[:, :, None]) + beta[:, :, None]
+        h = F.silu(h)
+        h = self.conv1(h)
+        h = F.silu(self.norm1(h))
+        return (skip + h) / math.sqrt(2.0)
 
 
-class TinyAdaLNTransformer1D(nn.Module):
-    def __init__(self, cfg: TorchTransformerConfig):
+def block_sequence(in_ch: int, out_ch: int, n_blocks: int, cfg: TorchUNetConfig):
+    layers = []
+    cur = in_ch
+    for _ in range(n_blocks):
+        layers.append(ResAdaGNBlock(cur, out_ch, cfg))
+        cur = out_ch
+    return nn.ModuleList(layers)
+
+
+class TinyUNet1D(nn.Module):
+    def __init__(self, cfg: TorchUNetConfig):
         super().__init__()
         self.cfg = cfg
-        if cfg.ambient_dim % cfg.patch_size != 0:
-            raise ValueError("ambient_dim must be divisible by patch_size")
-        self.n_patches = cfg.ambient_dim // cfg.patch_size
+        c0 = cfg.base_channels * cfg.channel_mults[0]
+        c1 = cfg.base_channels * cfg.channel_mults[1]
+        c2 = cfg.base_channels * cfg.channel_mults[2]
         self.time_mlp0 = nn.Linear(cfg.time_embed_dim, cfg.time_width)
         self.time_mlp1 = nn.Linear(cfg.time_width, cfg.time_width)
-        self.patch_embed = nn.Linear(cfg.patch_size, cfg.dim)
-        self.pos_embed = nn.Parameter(torch.zeros(1, self.n_patches, cfg.dim))
-        self.blocks = nn.ModuleList([AdaLNTransformerBlock(cfg) for _ in range(cfg.depth)])
-        self.final_norm = nn.LayerNorm(cfg.dim, elementwise_affine=False)
-        self.final_ada = nn.Linear(cfg.time_width, 2 * cfg.dim)
-        self.output_proj = nn.Linear(cfg.dim, cfg.patch_size)
-        nn.init.zeros_(self.final_ada.weight)
-        nn.init.zeros_(self.final_ada.bias)
+        self.input_proj = nn.Linear(cfg.patch_size, c0)
+        self.enc0 = block_sequence(c0, c0, cfg.blocks_per_level, cfg)
+        self.enc1 = block_sequence(c0, c1, cfg.blocks_per_level, cfg)
+        self.enc2 = block_sequence(c1, c2, cfg.blocks_per_level, cfg)
+        self.mid = block_sequence(c2, c2, cfg.blocks_per_level, cfg)
+        self.dec1 = block_sequence(c2 + c1, c1, cfg.blocks_per_level, cfg)
+        self.dec0 = block_sequence(c1 + c0, c0, cfg.blocks_per_level, cfg)
+        self.output_proj = nn.Linear(c0, cfg.patch_size)
         if cfg.zero_init_output:
             nn.init.zeros_(self.output_proj.weight)
             nn.init.zeros_(self.output_proj.bias)
 
     def patchify(self, x: torch.Tensor):
-        return x.reshape(x.shape[0], self.n_patches, self.cfg.patch_size)
+        cfg = self.cfg
+        if cfg.patch_size == 4 and cfg.stride == 2:
+            return torch.stack(
+                [
+                    x[:, 0 : cfg.ambient_dim - 2 : 2],
+                    x[:, 1 : cfg.ambient_dim - 1 : 2],
+                    x[:, 2 : cfg.ambient_dim : 2],
+                    x[:, 3 : cfg.ambient_dim + 1 : 2],
+                ],
+                dim=-1,
+            )
+        return x.unfold(dimension=1, size=cfg.patch_size, step=cfg.stride)
 
     def unpatchify(self, patches: torch.Tensor):
-        return patches.reshape(patches.shape[0], self.cfg.ambient_dim)
+        cfg = self.cfg
+        if cfg.patch_size == 4 and cfg.stride == 2:
+            even = torch.cat(
+                [
+                    patches[:, 0:1, 0],
+                    0.5 * (patches[:, 1:, 0] + patches[:, :-1, 2]),
+                    patches[:, -1:, 2],
+                ],
+                dim=1,
+            )
+            odd = torch.cat(
+                [
+                    patches[:, 0:1, 1],
+                    0.5 * (patches[:, 1:, 1] + patches[:, :-1, 3]),
+                    patches[:, -1:, 3],
+                ],
+                dim=1,
+            )
+            return torch.stack([even, odd], dim=-1).reshape(patches.shape[0], cfg.ambient_dim)
+        raise NotImplementedError("Generic unpatchify is intentionally not used for this experiment.")
+
+    @staticmethod
+    def downsample(x: torch.Tensor):
+        if x.shape[-1] % 2 == 1:
+            x = torch.cat([x, x[:, :, -1:]], dim=-1)
+        b, c, l = x.shape
+        return x.reshape(b, c, l // 2, 2).mean(dim=-1)
+
+    @staticmethod
+    def upsample_to(x: torch.Tensor, target_len: int):
+        y = x.repeat_interleave(2, dim=-1)
+        if y.shape[-1] >= target_len:
+            return y[:, :, :target_len]
+        pad = y[:, :, -1:].repeat(1, 1, target_len - y.shape[-1])
+        return torch.cat([y, pad], dim=-1)
+
+    @staticmethod
+    def apply_blocks(blocks: nn.ModuleList, x: torch.Tensor, t_cond: torch.Tensor):
+        h = x
+        for block in blocks:
+            h = block(h, t_cond)
+        return h
 
     def forward(self, z_t: torch.Tensor, t: torch.Tensor):
         t_emb = sinusoidal_embedding(t, self.cfg.time_embed_dim)
         t_cond = self.time_mlp1(F.silu(self.time_mlp0(t_emb)))
-        h = self.patch_embed(self.patchify(z_t)) + self.pos_embed
-        for block in self.blocks:
-            h = block(h, t_cond)
-        shift, scale = self.final_ada(t_cond).chunk(2, dim=-1)
-        h = modulate(self.final_norm(h), shift, scale)
-        patches = self.output_proj(h)
+        h = self.input_proj(self.patchify(z_t)).transpose(1, 2)
+        h0 = self.apply_blocks(self.enc0, h, t_cond)
+        h1 = self.apply_blocks(self.enc1, self.downsample(h0), t_cond)
+        h2 = self.apply_blocks(self.enc2, self.downsample(h1), t_cond)
+        hm = self.apply_blocks(self.mid, h2, t_cond)
+        u1 = torch.cat([self.upsample_to(hm, h1.shape[-1]), h1], dim=1)
+        u1 = self.apply_blocks(self.dec1, u1, t_cond)
+        u0 = torch.cat([self.upsample_to(u1, h0.shape[-1]), h0], dim=1)
+        u0 = self.apply_blocks(self.dec0, u0, t_cond)
+        patches = self.output_proj(u0.transpose(1, 2))
         return self.unpatchify(patches)
 
 
 def count_params(model: nn.Module) -> int:
     return int(sum(p.numel() for p in model.parameters()))
-
-
-def config_from_checkpoint(checkpoint: dict[str, Any]) -> TorchTransformerConfig:
-    cfg = dict(checkpoint["model_config"])
-    allowed = TorchTransformerConfig.__dataclass_fields__.keys()
-    return TorchTransformerConfig(**{k: cfg[k] for k in allowed if k in cfg})
-
-
-def infer_step_offset(run_dir: Path) -> int:
-    loss_path = run_dir / "logs" / "loss.csv"
-    if not loss_path.exists():
-        return 0
-    with open(loss_path, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-    if not rows:
-        return 0
-    return int(max(float(row["step"]) for row in rows if row.get("step")))
 
 
 def pred_to_velocity_torch(raw: torch.Tensor, z_t: torch.Tensor, t: torch.Tensor, mode: str, t_min: float):
@@ -207,7 +239,7 @@ def make_batch(x0_all: torch.Tensor, cfg: TorchTrainConfig, generator: torch.Gen
     return x0, eps, t, z_t
 
 
-def loss_fn(model: TinyAdaLNTransformer1D, batch, mode: str, t_min: float):
+def loss_fn(model: TinyUNet1D, batch, mode: str, t_min: float):
     x0, eps, t, z_t = batch
     raw = model(z_t, t)
     v_target = eps - x0
@@ -215,33 +247,14 @@ def loss_fn(model: TinyAdaLNTransformer1D, batch, mode: str, t_min: float):
     return F.mse_loss(v_pred, v_target)
 
 
-def train_mode(
-    mode: str,
-    init_state: dict[str, torch.Tensor] | None,
-    x0_all: torch.Tensor,
-    model_cfg: TorchTransformerConfig,
-    train_cfg: TorchTrainConfig,
-    device: torch.device,
-    seed: int,
-    *,
-    resume_checkpoint: dict[str, Any] | None = None,
-    step_offset: int = 0,
-):
-    model = TinyAdaLNTransformer1D(model_cfg).to(device)
-    if resume_checkpoint is not None:
-        model.load_state_dict(resume_checkpoint["model"])
-    elif init_state is not None:
-        model.load_state_dict(init_state)
-    else:
-        raise ValueError("Either init_state or resume_checkpoint must be provided.")
+def train_mode(mode: str, init_state: dict[str, torch.Tensor], x0_all: torch.Tensor, model_cfg: TorchUNetConfig, train_cfg: TorchTrainConfig, device: torch.device, seed: int):
+    model = TinyUNet1D(model_cfg).to(device)
+    model.load_state_dict(init_state)
     opt = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, betas=(train_cfg.beta1, train_cfg.beta2), eps=train_cfg.eps, weight_decay=train_cfg.weight_decay)
-    if resume_checkpoint is not None and "optimizer" in resume_checkpoint:
-        opt.load_state_dict(resume_checkpoint["optimizer"])
     generator = torch.Generator(device=device)
     generator.manual_seed(seed)
     rows = []
     for step in range(1, train_cfg.steps + 1):
-        global_step = step_offset + step
         opt.zero_grad(set_to_none=True)
         batch = make_batch(x0_all, train_cfg, generator, device)
         loss = loss_fn(model, batch, mode, train_cfg.t_min)
@@ -250,18 +263,14 @@ def train_mode(
         clip_scale = min(1.0, train_cfg.grad_clip_norm / (float(grad_norm) + 1e-12))
         opt.step()
         if step == 1 or step % train_cfg.loss_every == 0 or step == train_cfg.steps:
-            rows.append({"mode": mode, "step": global_step, "local_step": step, "loss": float(loss.detach().cpu()), "grad_norm": float(grad_norm), "clip_scale": clip_scale})
+            rows.append({"mode": mode, "step": step, "loss": float(loss.detach().cpu()), "grad_norm": float(grad_norm), "clip_scale": clip_scale})
         if step == 1 or step % train_cfg.print_every == 0 or step == train_cfg.steps:
-            print(
-                f"[{mode}] step {global_step:6d} (+{step:5d}/{train_cfg.steps}) "
-                f"loss={float(loss.detach().cpu()):.6f} grad_norm={float(grad_norm):.4f} clip={clip_scale:.3f}",
-                flush=True,
-            )
+            print(f"[{mode}] step {step:6d}/{train_cfg.steps} loss={float(loss.detach().cpu()):.6f} grad_norm={float(grad_norm):.4f} clip={clip_scale:.3f}", flush=True)
     return model, opt, rows
 
 
 @torch.no_grad()
-def sample_model(model: TinyAdaLNTransformer1D, mode: str, n_samples: int, sample_steps: int, t_min: float, device: torch.device, seed: int):
+def sample_model(model: TinyUNet1D, mode: str, n_samples: int, sample_steps: int, t_min: float, device: torch.device, seed: int):
     generator = torch.Generator(device=device)
     generator.manual_seed(seed)
     z = torch.randn((n_samples, model.cfg.ambient_dim), generator=generator, device=device)
@@ -277,7 +286,7 @@ def sample_model(model: TinyAdaLNTransformer1D, mode: str, n_samples: int, sampl
     return z.detach().cpu().numpy()
 
 
-def run_sampling_analysis(run_dir: Path, models: dict[str, TinyAdaLNTransformer1D], data: dict[str, np.ndarray], train_cfg: TorchTrainConfig, analysis_cfg: TorchAnalysisConfig, device: torch.device):
+def run_sampling_analysis(run_dir: Path, models: dict[str, TinyUNet1D], data: dict[str, np.ndarray], train_cfg: TorchTrainConfig, analysis_cfg: TorchAnalysisConfig, device: torch.device):
     rows = []
     sample_arrays = {}
     train_metrics = spectral_metrics(data["x0"], center=True, rank_threshold=analysis_cfg.rank95_threshold)
@@ -309,34 +318,23 @@ def pick_device(requested: str) -> torch.device:
 def run_experiment(args: argparse.Namespace):
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    data_path, data = get_or_create_dataset(output_root, args.ambient_dim, args.n_samples, args.data_noise, args.seed)
     device = pick_device(args.device)
     if device.type == "cpu":
         torch.set_num_threads(args.num_threads)
 
-    resume_run_dir = Path(args.resume_run_dir) if args.resume_run_dir else None
-    resume_checkpoints: dict[str, dict[str, Any]] = {}
-    if resume_run_dir is not None:
-        data_path = resume_run_dir / "training_data_snapshot.npz"
-        data = dict(np.load(data_path))
-        resume_step_offset = args.resume_step_offset if args.resume_step_offset is not None else infer_step_offset(resume_run_dir)
-        for mode in MODES:
-            resume_checkpoints[mode] = torch.load(resume_run_dir / "checkpoints" / f"{mode}_final.pt", map_location=device)
-        model_cfg = config_from_checkpoint(resume_checkpoints["x"])
-    else:
-        data_path, data = get_or_create_dataset(output_root, args.ambient_dim, args.n_samples, args.data_noise, args.seed)
-        resume_step_offset = 0
-        model_cfg = TorchTransformerConfig(
-            ambient_dim=args.ambient_dim,
-            patch_size=args.patch_size,
-            dim=args.dim,
-            depth=args.depth,
-            heads=args.heads,
-            mlp_width=args.mlp_width,
-            time_embed_dim=args.time_embed_dim,
-            time_width=args.time_width,
-            zero_init_output=True,
-            attention_impl=args.attention_impl,
-        )
+    model_cfg = TorchUNetConfig(
+        ambient_dim=args.ambient_dim,
+        patch_size=args.patch_size,
+        stride=args.stride,
+        base_channels=args.base_channels,
+        blocks_per_level=args.blocks_per_level,
+        kernel_size=args.kernel_size,
+        time_embed_dim=args.time_embed_dim,
+        time_width=args.time_width,
+        groups=args.groups,
+        zero_init_output=True,
+    )
     train_cfg = TorchTrainConfig(
         steps=args.steps,
         batch_size=args.batch_size,
@@ -348,21 +346,12 @@ def run_experiment(args: argparse.Namespace):
     analysis_cfg = TorchAnalysisConfig(sample_n=args.sample_n, sample_steps=args.sample_steps)
 
     torch.manual_seed(args.seed + 123)
-    init_model = TinyAdaLNTransformer1D(model_cfg)
-    init_state = None if resume_run_dir is not None else {k: v.detach().clone() for k, v in init_model.state_dict().items()}
+    init_model = TinyUNet1D(model_cfg)
+    init_state = {k: v.detach().clone() for k, v in init_model.state_dict().items()}
     n_params = count_params(init_model)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if args.run_name:
-        run_name = args.run_name
-    elif resume_run_dir is not None:
-        run_name = (
-            f"torch_transformer1d_resume_D{model_cfg.ambient_dim}_adamw_p{model_cfg.patch_size}_d{model_cfg.dim}"
-            f"_h{model_cfg.heads}_L{model_cfg.depth}_m{model_cfg.mlp_width}_{model_cfg.attention_impl}"
-            f"_from{resume_step_offset}_to{resume_step_offset + args.steps}_seed{args.seed}_{ts}"
-        )
-    else:
-        run_name = f"torch_transformer1d_D{args.ambient_dim}_adamw_p{args.patch_size}_d{args.dim}_h{args.heads}_L{args.depth}_m{args.mlp_width}_{args.attention_impl}_steps{args.steps}_seed{args.seed}_{ts}"
+    run_name = args.run_name or f"torch_unet1d_D{args.ambient_dim}_adamw_b{args.base_channels}_k{args.kernel_size}_p{args.patch_size}_s{args.stride}_steps{args.steps}_seed{args.seed}_{ts}"
     run_dir = output_root / "runs" / run_name
     run_dir.mkdir(parents=True, exist_ok=False)
     (run_dir / "logs").mkdir(exist_ok=True)
@@ -374,77 +363,56 @@ def run_experiment(args: argparse.Namespace):
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "data_path": str(data_path),
         "modes": list(MODES),
-        "experiment_type": "torch_transformer1d_sampling_training",
+        "experiment_type": "torch_unet1d_sampling_training",
         "optimizer": "AdamW",
         "device": str(device),
-        "model_family": "TinyAdaLNTransformer1D",
+        "model_family": "TinyUNet1D_AdaGN",
         "model_config": asdict(model_cfg),
         "parameter_count": n_params,
-        "patch_count": args.ambient_dim // args.patch_size,
+        "patch_count": (args.ambient_dim - args.patch_size) // args.stride + 1,
         "train_config": asdict(train_cfg),
         "analysis_config": asdict(analysis_cfg),
-        "resume_run_dir": str(resume_run_dir) if resume_run_dir is not None else None,
-        "resume_step_offset": resume_step_offset,
-        "resume_target_step": resume_step_offset + args.steps,
     }
     (run_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     np.savez_compressed(run_dir / "training_data_snapshot.npz", **data)
     print(json.dumps({"run_dir": str(run_dir), "device": str(device), "parameter_count": n_params, "patch_count": metadata["patch_count"]}, indent=2), flush=True)
 
     x0_all = torch.as_tensor(data["x0"], dtype=torch.float32, device=device)
-    models: dict[str, TinyAdaLNTransformer1D] = {}
+    models: dict[str, TinyUNet1D] = {}
     all_rows: list[dict[str, Any]] = []
     for mode in MODES:
-        print(f"\n{'=' * 90}\nTorch Transformer1D training mode={mode}\n{'=' * 90}", flush=True)
-        model, opt, rows = train_mode(
-            mode,
-            init_state,
-            x0_all,
-            model_cfg,
-            train_cfg,
-            device,
-            seed=args.seed + 1000 + resume_step_offset,
-            resume_checkpoint=resume_checkpoints.get(mode),
-            step_offset=resume_step_offset,
-        )
+        print(f"\n{'=' * 90}\nTorch UNet1D training mode={mode}\n{'=' * 90}", flush=True)
+        model, opt, rows = train_mode(mode, init_state, x0_all, model_cfg, train_cfg, device, seed=args.seed + 1000)
         models[mode] = model
         all_rows.extend(rows)
         if args.save_checkpoints:
             torch.save(
-                {
-                    "mode": mode,
-                    "model": model.state_dict(),
-                    "optimizer": opt.state_dict(),
-                    "model_config": asdict(model_cfg),
-                    "train_config": asdict(train_cfg),
-                    "step": resume_step_offset + train_cfg.steps,
-                    "resume_run_dir": str(resume_run_dir) if resume_run_dir is not None else None,
-                },
+                {"mode": mode, "model": model.state_dict(), "optimizer": opt.state_dict(), "model_config": asdict(model_cfg), "train_config": asdict(train_cfg)},
                 run_dir / "checkpoints" / f"{mode}_final.pt",
             )
     write_csv(run_dir / "logs" / "loss.csv", all_rows)
     print("\nPost-training sampling analysis", flush=True)
     run_sampling_analysis(run_dir, models, data, train_cfg, analysis_cfg, device)
-    print(f"\nTorch Transformer1D run complete: {run_dir}", flush=True)
+    print(f"\nTorch UNet1D run complete: {run_dir}", flush=True)
     return run_dir
 
 
 def build_argparser():
-    p = argparse.ArgumentParser(description="PyTorch Tiny Transformer1D + AdaLN-zero toy diffusion sampling experiment")
-    p.add_argument("--output-root", default="results/torch_transformer1d_sampling")
+    p = argparse.ArgumentParser(description="PyTorch Tiny UNet1D + AdaGN toy diffusion sampling experiment")
+    p.add_argument("--output-root", default="results/torch_unet1d_sampling")
     p.add_argument("--run-name", default=None)
     p.add_argument("--ambient-dim", type=int, default=512)
     p.add_argument("--n-samples", type=int, default=8192)
     p.add_argument("--data-noise", type=float, default=0.0)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--patch-size", type=int, default=8)
-    p.add_argument("--dim", type=int, default=128)
-    p.add_argument("--depth", type=int, default=5)
-    p.add_argument("--heads", type=int, default=1)
-    p.add_argument("--mlp-width", type=int, default=512)
-    p.add_argument("--attention-impl", choices=("torch", "manual"), default="torch")
+    p.add_argument("--patch-size", type=int, default=4)
+    p.add_argument("--stride", type=int, default=2)
+    p.add_argument("--base-channels", type=int, default=56)
+    p.add_argument("--blocks-per-level", type=int, default=2)
+    p.add_argument("--kernel-size", type=int, default=3)
     p.add_argument("--time-embed-dim", type=int, default=256)
     p.add_argument("--time-width", type=int, default=256)
+    p.add_argument("--groups", type=int, default=8)
     p.add_argument("--steps", type=int, default=100_000)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--lr", type=float, default=1e-4)
@@ -456,8 +424,6 @@ def build_argparser():
     p.add_argument("--device", default="auto")
     p.add_argument("--num-threads", type=int, default=8)
     p.add_argument("--save-checkpoints", action="store_true")
-    p.add_argument("--resume-run-dir", default=None, help="Continue from a previous run directory containing checkpoints and training_data_snapshot.npz.")
-    p.add_argument("--resume-step-offset", type=int, default=None, help="Global step offset for resumed logs. Defaults to max step in the previous loss.csv.")
     return p
 
 

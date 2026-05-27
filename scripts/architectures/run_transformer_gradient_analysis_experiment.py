@@ -4,12 +4,17 @@ import argparse
 import csv
 import json
 import os
+import sys
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path.cwd() / ".mplconfig"))
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -19,7 +24,7 @@ import torch.nn as nn
 from clean_jax_exp.data import get_or_create_dataset
 from clean_jax_exp.metrics import sign_invariant_angle_deg, spectral_metrics, top_right_singular_vector
 from clean_jax_exp.visualize import ANGLE_LABELS, MATRIX_LABELS, MODE_COLORS, MODE_LABELS, MODE_MARKERS, setup_style
-from run_transformer1d_torch_experiment import (
+from scripts.architectures.run_transformer1d_torch_experiment import (
     MODES,
     TinyAdaLNTransformer1D,
     TorchTrainConfig,

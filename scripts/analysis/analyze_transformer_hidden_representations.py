@@ -4,10 +4,15 @@ import argparse
 import csv
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path.cwd() / ".mplconfig"))
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,7 +22,7 @@ import torch.nn.functional as F
 
 from clean_jax_exp.metrics import spectral_metrics
 from clean_jax_exp.visualize import MODE_COLORS, MODE_HATCHES, MODE_LABELS, MODE_MARKERS, MODES, setup_style
-from run_transformer1d_torch_experiment import TorchTransformerConfig, TinyAdaLNTransformer1D, modulate
+from scripts.architectures.run_transformer1d_torch_experiment import TorchTransformerConfig, TinyAdaLNTransformer1D, modulate
 
 
 STREAM_LABELS = {
@@ -111,7 +116,7 @@ def collect_patch_streams_manual(model: TinyAdaLNTransformer1D, z_t: torch.Tenso
     # This mirrors TinyAdaLNTransformer1D.forward while exposing token clouds at
     # the normalization and AdaLN fan-in boundaries. Each recorded tensor has
     # shape [batch, patches, width] and is flattened later to patch point clouds.
-    from run_transformer1d_torch_experiment import sinusoidal_embedding
+    from scripts.architectures.run_transformer1d_torch_experiment import sinusoidal_embedding
 
     records: dict[tuple[int, str], np.ndarray] = {}
     t_emb = sinusoidal_embedding(t, model.cfg.time_embed_dim)

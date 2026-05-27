@@ -1,71 +1,98 @@
-# Diffusion Model Inductive Bias Toy Experiments
+# JIT Toy Experiments: Diffusion-Model Inductive Bias
 
-This project studies why denoising models succeed or fail under different output parameterizations. The clean workflow is organized around three deliberately separate experiments:
-
-1. Hidden representation dimensionality, stability, and sampling after long training.
-2. Early gradient rank and principal-angle dynamics.
-3. Sampling-only architecture comparison with a Tiny 1D U-Net + AdaGN.
-4. Sampling-only architecture comparison with a small AdaLN-zero Transformer over 1D patches.
-5. FCN architecture variants, currently including a learned EDM-like long skip.
-
-The separation is intentional. The representation experiment needs sufficiently converged FCN models. The gradient experiment needs dense early-training diagnostics and should not be conflated with final sample quality. The U-Net and Transformer experiments are sampling-only for now, because hidden-representation and gradient diagnostics for non-FCN architectures require a separate hook design.
-
-The main hypothesis is that successful denoising corresponds to learning corruption-stable, data-dependent low-dimensional structure, while failing parameterizations write or chase high-dimensional noise directions.
-
-The local gradient mechanism is
+This repository contains toy diffusion/flow-matching experiments for studying why different prediction parameterizations behave differently in high-dimensional ambient space. The central empirical question is:
 
 ```text
-grad_W L = residual.T @ activation
+Why does predicting clean data often recover the low-dimensional data manifold,
+while predicting velocity or noise can fail or learn very different dynamics?
 ```
 
-The gradient-analysis script checks this factorization numerically when it records activation and residual matrices.
+The working hypothesis is not simply that noise is harder to express. The more precise hypothesis is that the training dynamics have an implicit bias: stable low-dimensional signal directions are accumulated by the optimizer, while unstable or high-dimensional residual directions are either written into many parameter directions or compressed by architectural structure.
 
-## Current Project Layout
+## Current Layout
 
 ```text
 .
-├── clean_jax_exp/
-│   ├── data.py                         # Fixed Swiss-roll data generation and projection
-│   ├── models.py                       # 5-block residual FCN with pre-norm AdaLN-zero
-│   ├── models_longskip.py              # FCN backbone plus learned scalar long skip
-│   ├── metrics.py                      # Stable rank, PCA ranks, principal angles, NSV
-│   ├── train_representation.py         # Long training + representation/stability/sampling analysis
-│   ├── train_representation_longskip.py # Long-skip FCN long training + posthoc analysis
-│   ├── train_gradient.py               # Early gradient-rank and principal-angle analysis
-│   ├── posthoc_analysis.py             # Sample quality and hidden-spectrum posthoc analysis
-│   └── visualize.py                    # Paper-friendly independent plot functions
-├── run_clean_jax_experiment.py          # Representation experiment CLI
-├── run_clean_jax_longskip_experiment.py # Learned long-skip FCN representation CLI
-├── run_gradient_analysis_experiment.py  # Gradient-analysis experiment CLI
-├── run_gradient_longskip_experiment.py  # Learned long-skip FCN gradient-analysis CLI
-├── run_unet1d_torch_experiment.py       # Tiny 1D U-Net + AdaGN sampling-only CLI
-├── run_transformer1d_torch_experiment.py # AdaLN-zero Transformer sampling-only CLI
-├── run_transformer_gradient_analysis_experiment.py # Transformer gradient-analysis CLI
+├── README.md
+├── requirements.txt
 ├── 01_representation_dimension_and_stability.ipynb
 ├── 02_gradient_rank_and_angle.ipynb
-├── results/clean_jax_representation/
-├── results/clean_jax_gradient/
-├── results/torch_unet1d_sampling/
-├── results/torch_transformer1d_sampling/
-└── old_notebooks_and_data/
+├── clean_jax_exp/
+│   ├── data.py
+│   ├── metrics.py
+│   ├── models.py
+│   ├── models_longskip.py
+│   ├── train_representation.py
+│   ├── train_representation_longskip.py
+│   ├── train_gradient.py
+│   ├── train_gradient_longskip.py
+│   ├── posthoc_analysis.py
+│   └── visualize.py
+├── scripts/
+│   ├── fcn/
+│   │   ├── run_clean_jax_experiment.py
+│   │   ├── run_clean_jax_longskip_experiment.py
+│   │   ├── run_gradient_analysis_experiment.py
+│   │   └── run_gradient_longskip_experiment.py
+│   ├── architectures/
+│   │   ├── run_transformer1d_torch_experiment.py
+│   │   ├── run_transformer_gradient_analysis_experiment.py
+│   │   ├── run_mixer1d_torch_experiment.py
+│   │   └── run_unet1d_torch_experiment.py
+│   └── analysis/
+│       ├── analyze_longskip_coefficients.py
+│       ├── analyze_transformer_hidden_representations.py
+│       └── analyze_gradient_effective_rank90.py
+├── docs/
+│   └── PROJECT_SUMMARY.md
+├── results/                  # local, git-ignored experiment outputs
+└── old_notebooks_and_data/    # local, git-ignored historical archive
 ```
 
 ## Main Notebooks
 
 `01_representation_dimension_and_stability.ipynb`
 
-Origin experiment. It trains or loads the long-training representation run, then visualizes hidden representation dimension, representation stability, sampling quality, and sampled point-cloud dimension. It measures both the LayerNorm representation (`norm`) and the post-AdaLN MLP fan-in (`fanin`). Visualizations are independent single plots with local legends, no embedded titles, log-scale loss curves, aligned sample coordinates, and numeric labels on bar charts.
+Origin experiment. It focuses on long-training FCN models and analyzes internal representation dimensionality, representation stability under resampled noise, sampling quality, sample point-cloud dimension, and learned point-cloud subspace alignment. It measures both the residual stream and the AdaLN fan-in representation.
 
 `02_gradient_rank_and_angle.ipynb`
 
-Mechanistic follow-up. It reads the early-gradient run and visualizes stable rank, 90% PCA rank, and principal-angle drift for gradients, AdamW first moment, actual updates, activations, and residuals. It also displays the numerical sanity check for `grad_W = residual.T @ activation`.
+Mechanistic follow-up. It focuses on early training and visualizes stable rank, rank90 effective rank, principal-angle drift, and the matrix factorization sanity check for gradients. It reads saved logs rather than recomputing figures from notebooks whenever possible.
 
-## Representation Runner
+## Core Package
 
-Long-training run for Notebook 1:
+`clean_jax_exp/` contains the reusable FCN/JAX code:
+
+| file | role |
+| --- | --- |
+| `data.py` | Swiss-roll data generation, high-dimensional projection, fixed data snapshots |
+| `models.py` | 5-block residual FCN with pre-norm AdaLN-zero and zero-initialized output |
+| `models_longskip.py` | FCN plus learned EDM-like scalar long skip |
+| `metrics.py` | stable rank, rank90/rank95, singular vectors, principal angles |
+| `train_representation.py` | long FCN training plus representation/sampling analysis |
+| `train_representation_longskip.py` | long-skip FCN long training and posthoc analysis |
+| `train_gradient.py` | early FCN gradient dynamics logging |
+| `train_gradient_longskip.py` | early long-skip FCN gradient dynamics logging |
+| `posthoc_analysis.py` | sample quality, ambient Chamfer, sample subspace analysis, spectrum analysis |
+| `visualize.py` | paper-oriented plotting utilities |
+
+## Script Groups
+
+### FCN runners
+
+These are the most important baseline scripts.
 
 ```bash
-/Users/tongtongliang/miniforge3/bin/python3.12 run_clean_jax_experiment.py \
+python scripts/fcn/run_clean_jax_experiment.py --help
+python scripts/fcn/run_clean_jax_longskip_experiment.py --help
+python scripts/fcn/run_gradient_analysis_experiment.py --help
+python scripts/fcn/run_gradient_longskip_experiment.py --help
+```
+
+Typical long representation run:
+
+```bash
+/Users/tongtongliang/miniforge3/bin/python3.12 scripts/fcn/run_clean_jax_experiment.py \
   --output-root results/clean_jax_representation \
   --ambient-dim 512 \
   --n-samples 8192 \
@@ -81,64 +108,10 @@ Long-training run for Notebook 1:
   --save-checkpoints
 ```
 
-This script does not record gradient-rank matrices. It saves loss, final checkpoints, representation metrics, stability metrics, generated samples, sample point-cloud metrics, and figures.
-
-## Learned Long-Skip FCN Runner
-
-Architecture variant for Notebook 1-style long training:
+Typical early-gradient run:
 
 ```bash
-/Users/tongtongliang/miniforge3/bin/python3.12 run_clean_jax_longskip_experiment.py \
-  --output-root results/clean_jax_representation_longskip \
-  --ambient-dim 512 \
-  --n-samples 8192 \
-  --width 256 \
-  --depth 5 \
-  --time-embed-dim 256 \
-  --steps 100000 \
-  --batch-size 256 \
-  --loss-every 100 \
-  --print-every 1000 \
-  --lr 1e-4 \
-  --grad-clip-norm 1.0 \
-  --save-checkpoints
-```
-
-This keeps the same 5-block AdaLN-zero FCN backbone and adds a tiny scalar controller:
-
-```text
-raw(z_t, t) = c_skip(t) * z_t + c_out(t) * nnet(z_t, t)
-```
-
-The controller is a zero-initialized linear head on the existing time-conditioning vector. At initialization, `c_skip(t)=0` and `c_out(t)=1`, so the model starts exactly like the baseline zero-output FCN. The extra head adds only 514 parameters for the default D=512, width=256 setup. The runner saves the same losses, checkpoints, representation metrics, stability metrics, samples, sample-quality metrics, and figures as the baseline representation runner.
-
-Long-skip early-gradient run:
-
-```bash
-/Users/tongtongliang/miniforge3/bin/python3.12 run_gradient_longskip_experiment.py \
-  --output-root results/clean_jax_gradient_longskip \
-  --ambient-dim 512 \
-  --n-samples 8192 \
-  --width 256 \
-  --depth 5 \
-  --time-embed-dim 256 \
-  --steps 2000 \
-  --batch-size 256 \
-  --metric-every 20 \
-  --print-every 50 \
-  --lr 1e-4 \
-  --grad-clip-norm 1.0 \
-  --save-checkpoints
-```
-
-This records the same gradient, AdamW first-moment, update, activation, residual, and principal-angle metrics as the baseline gradient runner. It also tracks the added `skip_head` matrix and uses a long-skip-specific sanity check for `grad_W = residual.T @ activation`.
-
-## Gradient Runner
-
-Early-gradient run for Notebook 2:
-
-```bash
-/Users/tongtongliang/miniforge3/bin/python3.12 run_gradient_analysis_experiment.py \
+/Users/tongtongliang/miniforge3/bin/python3.12 scripts/fcn/run_gradient_analysis_experiment.py \
   --output-root results/clean_jax_gradient \
   --ambient-dim 512 \
   --n-samples 8192 \
@@ -153,114 +126,21 @@ Early-gradient run for Notebook 2:
   --grad-clip-norm 1.0
 ```
 
-This script does not run representation/stability/sampling posthoc analysis. It saves loss, matrix-rank logs, angle logs, and gradient-factorization sanity checks.
+### Architecture comparison runners
 
-## Tiny U-Net Runner
-
-Sampling-only architecture comparison:
+These are sampling or architecture-specific diagnostics.
 
 ```bash
-python run_unet1d_torch_experiment.py \
-  --output-root results/torch_unet1d_sampling \
-  --ambient-dim 512 \
-  --n-samples 8192 \
-  --patch-size 4 \
-  --stride 2 \
-  --base-channels 56 \
-  --kernel-size 3 \
-  --blocks-per-level 2 \
-  --time-embed-dim 256 \
-  --time-width 256 \
-  --groups 8 \
-  --steps 100000 \
-  --batch-size 256 \
-  --loss-every 100 \
-  --print-every 1000 \
-  --lr 1e-4 \
-  --grad-clip-norm 1.0 \
-  --sample-n 2048 \
-  --sample-steps 100 \
-  --device auto \
-  --save-checkpoints
+python scripts/architectures/run_transformer1d_torch_experiment.py --help
+python scripts/architectures/run_transformer_gradient_analysis_experiment.py --help
+python scripts/architectures/run_mixer1d_torch_experiment.py --help
+python scripts/architectures/run_unet1d_torch_experiment.py --help
 ```
 
-This runner uses PyTorch and automatically selects `cuda`, then `mps`, then `cpu`. On the local Mac, MPS only works outside Codex's filesystem sandbox; the sandbox can make PyTorch mis-detect the macOS version. On a GPU server, `--device auto` should choose CUDA.
-
-The default U-Net is a Tiny 1D U-Net over overlapping local windows:
-
-```text
-ambient dimension = 512
-local window = 4
-stride = 2
-patch count = 255
-base channels = 56
-kernel size = 3
-parameter count ~= 1.98M
-```
-
-This is intentionally close to the FCN parameter count of about `2.04M`. The U-Net runner saves loss curves, checkpoints, generated samples, sample point-cloud dimensions, and sample-quality metrics. It does not collect hidden-representation or gradient-rank diagnostics.
-
-To generate figures after a U-Net run:
-
-```python
-from pathlib import Path
-from clean_jax_exp.visualize import latest_run, generate_sampling_figures
-
-run_dir = latest_run(Path("results/torch_unet1d_sampling/runs"))
-generate_sampling_figures(run_dir, save_pdf=False, show=False)
-```
-
-## Implementation Details
-
-- Training uses JAX/JIT on CPU from the `base` environment.
-- The `ml` environment currently does not have JAX installed.
-- The model is a 5-block residual FCN with pre-norm AdaLN-zero.
-- The final output projection is zero-initialized.
-- All three modes start from the same initialization.
-- All three modes use the same dynamic batch, `t`, and `epsilon` random sequence within each experiment.
-- Training uses dynamic diffusion-style sampling: every step resamples data indices, `t`, and Gaussian noise.
-- AdamW uses global gradient clipping before the first-moment update.
-- PDF export is off by default. Set `SAVE_PDF=True` in notebooks only after selecting final plot styling.
-- The sampling-only U-Net runner is PyTorch-based and should be run on CUDA or MPS for full 100k-step experiments.
-
-## Metrics
-
-`stable_rank`
-
-```text
-||A||_F^2 / ||A||_op^2
-```
-
-Measures whether matrix energy is concentrated in a few singular directions.
-
-`rank95`
-
-The number of PCA components needed to explain 95% of centered hidden-representation or sample point-cloud energy.
-
-`rank90`
-
-The number of PCA components needed to explain 90% of matrix energy in gradient-dynamics logs.
-
-`principal_angle`
-
-Sign-invariant angle between dominant right singular vectors of adjacent matrices. Large values mean the leading direction is rotating over training.
-
-`NSV`
-
-Normalized noise variance of hidden representations under resampled corruption noise for the same clean sample. Lower values mean more corruption-stable representations.
-
-## Archive
-
-Older notebooks, executed notebooks, historical PyTorch scripts, previous figures, and checkpoint files are preserved in `old_notebooks_and_data/`. They are not part of the clean main workflow, but remain available for comparison.
-
-The abandoned JAX U-Net prototype is archived under `old_notebooks_and_data/scripts/abandoned_jax_unet1d_20260525/`. It is kept for provenance, but the active U-Net path is `run_unet1d_torch_experiment.py`.
-
-## Tiny Transformer Runner
-
-Sampling-only architecture comparison with a simpler computation graph than the U-Net:
+Transformer sampling run:
 
 ```bash
-python run_transformer1d_torch_experiment.py \
+python scripts/architectures/run_transformer1d_torch_experiment.py \
   --output-root results/torch_transformer1d_sampling \
   --ambient-dim 512 \
   --n-samples 8192 \
@@ -270,40 +150,18 @@ python run_transformer1d_torch_experiment.py \
   --heads 1 \
   --mlp-width 512 \
   --attention-impl torch \
-  --time-embed-dim 256 \
-  --time-width 256 \
   --steps 100000 \
   --batch-size 256 \
-  --loss-every 100 \
-  --print-every 1000 \
   --lr 1e-4 \
   --grad-clip-norm 1.0 \
-  --sample-n 2048 \
-  --sample-steps 100 \
   --device auto \
   --save-checkpoints
 ```
 
-The default Transformer uses non-overlapping 1D patches:
-
-```text
-ambient dimension = 512
-patch size = 8
-patch count = 64
-Transformer width = 128
-attention heads = 1
-depth = 5
-MLP width = 512
-attention implementation = torch.nn.MultiheadAttention
-parameter count ~= 2.18M
-```
-
-Each block uses affine-free LayerNorm, AdaLN-zero shift/scale/gates from the time embedding, self-attention, and a token MLP. The default attention path uses `torch.nn.MultiheadAttention(batch_first=True)`, with `--attention-impl manual` available as a fallback. The final patch decoder is zero-initialized. Like the U-Net runner, this script saves loss curves, checkpoints, generated samples, sample point-cloud dimensions, and sample-quality metrics. It does not collect hidden-representation or gradient-rank diagnostics.
-
-Transformer early-gradient diagnostics:
+Transformer gradient run:
 
 ```bash
-python run_transformer_gradient_analysis_experiment.py \
+python scripts/architectures/run_transformer_gradient_analysis_experiment.py \
   --output-root results/torch_transformer1d_gradient \
   --ambient-dim 512 \
   --n-samples 8192 \
@@ -315,107 +173,74 @@ python run_transformer_gradient_analysis_experiment.py \
   --attention-impl manual \
   --steps 2000 \
   --batch-size 256 \
-  --loss-every 10 \
   --metric-every 20 \
   --print-every 50 \
   --lr 1e-4 \
   --grad-clip-norm 1.0 \
   --device mps \
-  --save-checkpoints \
   --make-figures
 ```
 
-This gradient runner intentionally uses `attention_impl=manual`, so QKV and attention-output projections are exposed as ordinary `Linear` matrices. It records gradient, AdamW first moment, actual update, activation, residual, and principal-angle diagnostics for `patch_embed`, every block's `qkv`, `attn_out`, `mlp0`, `mlp1`, and `output_proj`. The sanity check `grad_W = residual.T @ activation` is recorded for every tracked matrix.
-
-Local MPS benchmark on the MacBook:
+The gradient runner intentionally uses `attention_impl=manual`, because it exposes QKV and attention-output projections as ordinary matrices. It records gradient, AdamW first moment, actual update, activation, residual, rank metrics, angle metrics, and the numerical check for
 
 ```text
-100 training steps per prediction mode, batch size 256, D=512:
-wall time ~= 58 seconds including a small sampling pass
-projected 100k-step run over x/v/eps ~= 16-17 hours
+grad_W = residual.T @ activation
 ```
 
-Posthoc patch hidden-representation analysis for a completed Transformer run:
+### Posthoc analysis scripts
 
 ```bash
-python analyze_transformer_hidden_representations.py \
-  --run-dir results/torch_transformer1d_sampling/runs/<run-name> \
-  --device cpu \
-  --n-eval 256 \
-  --t-values 0.1,0.3,0.5,0.7,0.9
+python scripts/analysis/analyze_longskip_coefficients.py --help
+python scripts/analysis/analyze_transformer_hidden_representations.py --help
+python scripts/analysis/analyze_gradient_effective_rank90.py
 ```
 
-This reads `x/v/eps` checkpoints, reuses the saved training data snapshot, and records patch point-cloud metrics for:
+These scripts read completed runs and write additional CSVs/figures under each run's `analysis/` and `figures/` folders.
+
+## Output Contract
+
+Every non-smoke run should write this structure:
 
 ```text
-patch_embed
-attention pre-norm stream
-attention norm output
-attention AdaLN fan-in
-MLP pre-norm stream
-MLP norm output
-MLP AdaLN fan-in
-final pre-norm stream
-final norm output
-final AdaLN fan-in
+results/<experiment_family>/runs/<run_name>/
+├── metadata.json
+├── training_data_snapshot.npz
+├── logs/
+│   ├── loss.csv
+│   ├── matrix_metrics.csv          # gradient runs only
+│   ├── angle_metrics.csv           # gradient runs only
+│   └── sanity_metrics.csv          # gradient runs only
+├── checkpoints/                    # only when requested
+├── analysis/
+│   ├── sample_metrics.csv
+│   ├── sample_quality_metrics.csv
+│   ├── sample_subspace_metrics.csv
+│   └── representation*.csv         # representation runs only
+└── figures/
 ```
 
-Rows are flattened over `(sample, patch)` and measured as width-dimensional point clouds. The output is saved to `analysis/transformer_patch_representation_metrics.csv`, with grouped bar-chart figures under `figures/transformer_hidden_bars/`. The default plots combine attention and MLP into 10 Transformer sublayers (`B0 Attn`, `B0 MLP`, ..., `B4 MLP`) so the layout matches the FCN representation notebook.
+`results/` is intentionally git-ignored. The code and documentation are versioned; large logs, figures, and checkpoints stay local.
 
-## Tiny MLP-Mixer Runner
+## Metrics
 
-Sampling-only architecture comparison that keeps the Transformer patchification, embedding width, AdaLN-zero conditioning, and final patch decoder, but replaces each attention block with an MLP-Mixer block:
+| metric | meaning |
+| --- | --- |
+| `stable_rank` | `||A||_F^2 / ||A||_op^2`; continuous measure of energy concentration |
+| `rank90` | number of singular directions explaining 90% of matrix energy; used for gradient effective rank |
+| `rank95` | number of PCA directions explaining 95% of centered point-cloud energy; used for hidden/sample point clouds |
+| `principal_angle` | sign-invariant angle between dominant singular vectors across adjacent steps |
+| `NSV` | normalized representation variance under resampled corruption noise |
+| `ambient_chamfer` | Chamfer distance in the original D-dimensional ambient space |
+| `subspace_angle` | angle between sample PCA subspace and the true 2D data plane |
 
-```bash
-python run_mixer1d_torch_experiment.py \
-  --output-root results/torch_mixer1d_sampling \
-  --ambient-dim 512 \
-  --n-samples 8192 \
-  --patch-size 8 \
-  --dim 128 \
-  --depth 5 \
-  --token-mlp-width 128 \
-  --channel-mlp-width 512 \
-  --time-embed-dim 256 \
-  --time-width 256 \
-  --steps 100000 \
-  --batch-size 256 \
-  --loss-every 100 \
-  --print-every 1000 \
-  --lr 1e-4 \
-  --grad-clip-norm 1.0 \
-  --sample-n 2048 \
-  --sample-steps 100 \
-  --device auto \
-  --save-checkpoints
-```
+## Current Empirical Picture
 
-The default Mixer uses:
+The short version is:
 
-```text
-ambient dimension = 512
-patch size = 8
-patch count = 64
-Mixer width = 128
-depth = 5
-token-mixing MLP hidden width = 128
-channel-mixing MLP hidden width = 512
-parameter count ~= 1.94M
-parameter count excluding AdaLN/time ~= 0.75M
-```
+1. FCN clean prediction is strongly favored by early gradient dynamics.
+2. FCN velocity/noise prediction can write high-dimensional directions into the last layer and optimizer momentum.
+3. A learned long skip dramatically helps velocity prediction and partially helps noise prediction by letting the model represent large linear-in-`z_t` terms directly.
+4. Patch architectures change the story: Transformer/Mixer no longer show the same final-layer effective-rank explosion, but they can still fail or partially fail for noise because architecture compresses and routes the signal differently.
+5. Stable rank alone is not enough; rank90, angles, activation/residual factorization, sample Chamfer, and sample subspace alignment each reveal different failure modes.
 
-Parameter count comparison for D=512:
-
-| model | total params | excluding AdaLN/time |
-|---|---:|---:|
-| FCN width=256 depth=5 | 2.04M | 0.92M |
-| Transformer d=128 depth=5 | 2.18M | 1.00M |
-| MLP-Mixer d=128 depth=5 | 1.94M | 0.75M |
-
-Local MPS benchmark on the MacBook:
-
-```text
-100 training steps per prediction mode, batch size 256, D=512:
-wall time ~= 44 seconds including a small sampling pass
-projected 10k-step run over x/v/eps ~= 1.2-1.5 hours
-```
+For the detailed experiment log and interpretation, see [docs/PROJECT_SUMMARY.md](docs/PROJECT_SUMMARY.md).

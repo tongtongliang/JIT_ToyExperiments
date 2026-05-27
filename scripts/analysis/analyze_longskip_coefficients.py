@@ -4,11 +4,16 @@ import argparse
 import csv
 import json
 import os
+import sys
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path.cwd() / ".mplconfig"))
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import jax
 import jax.numpy as jnp

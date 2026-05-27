@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path.cwd() / ".mplconfig"))
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -11,7 +16,6 @@ import pandas as pd
 
 from clean_jax_exp.visualize import MODE_COLORS, MODE_HATCHES, MODE_LABELS, setup_style
 
-ROOT = Path(__file__).resolve().parent
 RUNS = {
     'FCN': ROOT/'results/clean_jax_gradient/runs/clean_jax_D512_adamw_w256_d5_s2000_seed42_20260525_114029',
     'FCN-longskip': ROOT/'results/clean_jax_gradient_longskip/runs/longskip_gradient_D512_adamw_w256_d5_s2000_seed42_20260526_202910',
