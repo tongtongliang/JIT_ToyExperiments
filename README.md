@@ -37,6 +37,7 @@ The gradient-analysis script checks this factorization numerically when it recor
 ├── run_clean_jax_experiment.py          # Representation experiment CLI
 ├── run_clean_jax_longskip_experiment.py # Learned long-skip FCN representation CLI
 ├── run_gradient_analysis_experiment.py  # Gradient-analysis experiment CLI
+├── run_gradient_longskip_experiment.py  # Learned long-skip FCN gradient-analysis CLI
 ├── run_unet1d_torch_experiment.py       # Tiny 1D U-Net + AdaGN sampling-only CLI
 ├── run_transformer1d_torch_experiment.py # AdaLN-zero Transformer sampling-only CLI
 ├── 01_representation_dimension_and_stability.ipynb
@@ -109,6 +110,27 @@ raw(z_t, t) = c_skip(t) * z_t + c_out(t) * nnet(z_t, t)
 ```
 
 The controller is a zero-initialized linear head on the existing time-conditioning vector. At initialization, `c_skip(t)=0` and `c_out(t)=1`, so the model starts exactly like the baseline zero-output FCN. The extra head adds only 514 parameters for the default D=512, width=256 setup. The runner saves the same losses, checkpoints, representation metrics, stability metrics, samples, sample-quality metrics, and figures as the baseline representation runner.
+
+Long-skip early-gradient run:
+
+```bash
+/Users/tongtongliang/miniforge3/bin/python3.12 run_gradient_longskip_experiment.py \
+  --output-root results/clean_jax_gradient_longskip \
+  --ambient-dim 512 \
+  --n-samples 8192 \
+  --width 256 \
+  --depth 5 \
+  --time-embed-dim 256 \
+  --steps 2000 \
+  --batch-size 256 \
+  --metric-every 20 \
+  --print-every 50 \
+  --lr 1e-4 \
+  --grad-clip-norm 1.0 \
+  --save-checkpoints
+```
+
+This records the same gradient, AdamW first-moment, update, activation, residual, and principal-angle metrics as the baseline gradient runner. It also tracks the added `skip_head` matrix and uses a long-skip-specific sanity check for `grad_W = residual.T @ activation`.
 
 ## Gradient Runner
 
