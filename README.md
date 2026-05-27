@@ -6,6 +6,7 @@ This project studies why denoising models succeed or fail under different output
 2. Early gradient rank and principal-angle dynamics.
 3. Sampling-only architecture comparison with a Tiny 1D U-Net + AdaGN.
 4. Sampling-only architecture comparison with a small AdaLN-zero Transformer over 1D patches.
+5. FCN architecture variants, currently including a learned EDM-like long skip.
 
 The separation is intentional. The representation experiment needs sufficiently converged FCN models. The gradient experiment needs dense early-training diagnostics and should not be conflated with final sample quality. The U-Net and Transformer experiments are sampling-only for now, because hidden-representation and gradient diagnostics for non-FCN architectures require a separate hook design.
 
@@ -26,12 +27,15 @@ The gradient-analysis script checks this factorization numerically when it recor
 ├── clean_jax_exp/
 │   ├── data.py                         # Fixed Swiss-roll data generation and projection
 │   ├── models.py                       # 5-block residual FCN with pre-norm AdaLN-zero
+│   ├── models_longskip.py              # FCN backbone plus learned scalar long skip
 │   ├── metrics.py                      # Stable rank, PCA ranks, principal angles, NSV
 │   ├── train_representation.py         # Long training + representation/stability/sampling analysis
+│   ├── train_representation_longskip.py # Long-skip FCN long training + posthoc analysis
 │   ├── train_gradient.py               # Early gradient-rank and principal-angle analysis
 │   ├── posthoc_analysis.py             # Sample quality and hidden-spectrum posthoc analysis
 │   └── visualize.py                    # Paper-friendly independent plot functions
 ├── run_clean_jax_experiment.py          # Representation experiment CLI
+├── run_clean_jax_longskip_experiment.py # Learned long-skip FCN representation CLI
 ├── run_gradient_analysis_experiment.py  # Gradient-analysis experiment CLI
 ├── run_unet1d_torch_experiment.py       # Tiny 1D U-Net + AdaGN sampling-only CLI
 ├── run_transformer1d_torch_experiment.py # AdaLN-zero Transformer sampling-only CLI
@@ -76,6 +80,35 @@ Long-training run for Notebook 1:
 ```
 
 This script does not record gradient-rank matrices. It saves loss, final checkpoints, representation metrics, stability metrics, generated samples, sample point-cloud metrics, and figures.
+
+## Learned Long-Skip FCN Runner
+
+Architecture variant for Notebook 1-style long training:
+
+```bash
+/Users/tongtongliang/miniforge3/bin/python3.12 run_clean_jax_longskip_experiment.py \
+  --output-root results/clean_jax_representation_longskip \
+  --ambient-dim 512 \
+  --n-samples 8192 \
+  --width 256 \
+  --depth 5 \
+  --time-embed-dim 256 \
+  --steps 100000 \
+  --batch-size 256 \
+  --loss-every 100 \
+  --print-every 1000 \
+  --lr 1e-4 \
+  --grad-clip-norm 1.0 \
+  --save-checkpoints
+```
+
+This keeps the same 5-block AdaLN-zero FCN backbone and adds a tiny scalar controller:
+
+```text
+raw(z_t, t) = c_skip(t) * z_t + c_out(t) * nnet(z_t, t)
+```
+
+The controller is a zero-initialized linear head on the existing time-conditioning vector. At initialization, `c_skip(t)=0` and `c_out(t)=1`, so the model starts exactly like the baseline zero-output FCN. The extra head adds only 514 parameters for the default D=512, width=256 setup. The runner saves the same losses, checkpoints, representation metrics, stability metrics, samples, sample-quality metrics, and figures as the baseline representation runner.
 
 ## Gradient Runner
 
