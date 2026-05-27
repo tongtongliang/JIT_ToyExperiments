@@ -40,6 +40,7 @@ The gradient-analysis script checks this factorization numerically when it recor
 ├── run_gradient_longskip_experiment.py  # Learned long-skip FCN gradient-analysis CLI
 ├── run_unet1d_torch_experiment.py       # Tiny 1D U-Net + AdaGN sampling-only CLI
 ├── run_transformer1d_torch_experiment.py # AdaLN-zero Transformer sampling-only CLI
+├── run_transformer_gradient_analysis_experiment.py # Transformer gradient-analysis CLI
 ├── 01_representation_dimension_and_stability.ipynb
 ├── 02_gradient_rank_and_angle.ipynb
 ├── results/clean_jax_representation/
@@ -298,6 +299,33 @@ parameter count ~= 2.18M
 ```
 
 Each block uses affine-free LayerNorm, AdaLN-zero shift/scale/gates from the time embedding, self-attention, and a token MLP. The default attention path uses `torch.nn.MultiheadAttention(batch_first=True)`, with `--attention-impl manual` available as a fallback. The final patch decoder is zero-initialized. Like the U-Net runner, this script saves loss curves, checkpoints, generated samples, sample point-cloud dimensions, and sample-quality metrics. It does not collect hidden-representation or gradient-rank diagnostics.
+
+Transformer early-gradient diagnostics:
+
+```bash
+python run_transformer_gradient_analysis_experiment.py \
+  --output-root results/torch_transformer1d_gradient \
+  --ambient-dim 512 \
+  --n-samples 8192 \
+  --patch-size 8 \
+  --dim 128 \
+  --depth 5 \
+  --heads 1 \
+  --mlp-width 512 \
+  --attention-impl manual \
+  --steps 2000 \
+  --batch-size 256 \
+  --loss-every 10 \
+  --metric-every 20 \
+  --print-every 50 \
+  --lr 1e-4 \
+  --grad-clip-norm 1.0 \
+  --device mps \
+  --save-checkpoints \
+  --make-figures
+```
+
+This gradient runner intentionally uses `attention_impl=manual`, so QKV and attention-output projections are exposed as ordinary `Linear` matrices. It records gradient, AdamW first moment, actual update, activation, residual, and principal-angle diagnostics for `patch_embed`, every block's `qkv`, `attn_out`, `mlp0`, `mlp1`, and `output_proj`. The sanity check `grad_W = residual.T @ activation` is recorded for every tracked matrix.
 
 Local MPS benchmark on the MacBook:
 
