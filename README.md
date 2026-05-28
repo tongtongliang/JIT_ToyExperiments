@@ -244,3 +244,6 @@ The short version is:
 5. Stable rank alone is not enough; rank90, angles, activation/residual factorization, sample Chamfer, and sample subspace alignment each reveal different failure modes.
 
 For the detailed experiment log and interpretation, see [docs/PROJECT_SUMMARY.md](docs/PROJECT_SUMMARY.md).
+
+For collaborator-facing oral explanations and figure/video caption language, see
+[docs/EXPERIMENT_TALK_TRACK_AND_CAPTIONS.md](docs/EXPERIMENT_TALK_TRACK_AND_CAPTIONS.md).
