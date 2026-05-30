@@ -10,6 +10,7 @@ FCN/JAX experiments. These are the primary controlled toy experiments.
 | --- | --- |
 | `run_clean_jax_experiment.py` | 100k-step representation/stability/sampling experiment for the baseline FCN |
 | `run_clean_jax_longskip_experiment.py` | same long experiment with learned scalar long skip |
+| `run_clean_jax_ufcn_experiment.py` | same long experiment with U-ViT-style hidden long skips, block1->block5 and block2->block4 at depth 5 |
 | `run_gradient_analysis_experiment.py` | 2000-step early gradient dynamics for the baseline FCN |
 | `run_gradient_longskip_experiment.py` | 2000-step early gradient dynamics for the long-skip FCN |
 

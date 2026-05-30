@@ -22,8 +22,10 @@ The working hypothesis is not simply that noise is harder to express. The more p
 │   ├── metrics.py
 │   ├── models.py
 │   ├── models_longskip.py
+│   ├── models_ufcn.py
 │   ├── train_representation.py
 │   ├── train_representation_longskip.py
+│   ├── train_representation_ufcn.py
 │   ├── train_gradient.py
 │   ├── train_gradient_longskip.py
 │   ├── posthoc_analysis.py
@@ -32,6 +34,7 @@ The working hypothesis is not simply that noise is harder to express. The more p
 │   ├── fcn/
 │   │   ├── run_clean_jax_experiment.py
 │   │   ├── run_clean_jax_longskip_experiment.py
+│   │   ├── run_clean_jax_ufcn_experiment.py
 │   │   ├── run_gradient_analysis_experiment.py
 │   │   └── run_gradient_longskip_experiment.py
 │   ├── architectures/
@@ -68,9 +71,11 @@ Mechanistic follow-up. It focuses on early training and visualizes stable rank, 
 | `data.py` | Swiss-roll data generation, high-dimensional projection, fixed data snapshots |
 | `models.py` | 5-block residual FCN with pre-norm AdaLN-zero and zero-initialized output |
 | `models_longskip.py` | FCN plus learned EDM-like scalar long skip |
+| `models_ufcn.py` | FCN plus U-ViT-style hidden long skips, block1->block5 and block2->block4 at depth 5 |
 | `metrics.py` | stable rank, rank90/rank95, singular vectors, principal angles |
 | `train_representation.py` | long FCN training plus representation/sampling analysis |
 | `train_representation_longskip.py` | long-skip FCN long training and posthoc analysis |
+| `train_representation_ufcn.py` | U-FCN long training and posthoc analysis |
 | `train_gradient.py` | early FCN gradient dynamics logging |
 | `train_gradient_longskip.py` | early long-skip FCN gradient dynamics logging |
 | `posthoc_analysis.py` | sample quality, ambient Chamfer, sample subspace analysis, spectrum analysis |
@@ -85,6 +90,7 @@ These are the most important baseline scripts.
 ```bash
 python scripts/fcn/run_clean_jax_experiment.py --help
 python scripts/fcn/run_clean_jax_longskip_experiment.py --help
+python scripts/fcn/run_clean_jax_ufcn_experiment.py --help
 python scripts/fcn/run_gradient_analysis_experiment.py --help
 python scripts/fcn/run_gradient_longskip_experiment.py --help
 ```
@@ -124,6 +130,25 @@ Typical early-gradient run:
   --print-every 50 \
   --lr 1e-4 \
   --grad-clip-norm 1.0
+```
+
+Typical U-FCN hidden-skip representation run:
+
+```bash
+/Users/tongtongliang/miniforge3/bin/python3.12 scripts/fcn/run_clean_jax_ufcn_experiment.py \
+  --output-root results/clean_jax_representation_ufcn \
+  --ambient-dim 512 \
+  --n-samples 8192 \
+  --width 256 \
+  --depth 5 \
+  --time-embed-dim 256 \
+  --steps 100000 \
+  --batch-size 256 \
+  --loss-every 100 \
+  --print-every 1000 \
+  --lr 1e-4 \
+  --grad-clip-norm 1.0 \
+  --save-checkpoints
 ```
 
 ### Architecture comparison runners
@@ -240,8 +265,9 @@ The short version is:
 1. FCN clean prediction is strongly favored by early gradient dynamics.
 2. FCN velocity/noise prediction can write high-dimensional directions into the last layer and optimizer momentum.
 3. A learned long skip dramatically helps velocity prediction and partially helps noise prediction by letting the model represent large linear-in-`z_t` terms directly.
-4. Patch architectures change the story: Transformer/Mixer no longer show the same final-layer effective-rank explosion, but they can still fail or partially fail for noise because architecture compresses and routes the signal differently.
-5. Stable rank alone is not enough; rank90, angles, activation/residual factorization, sample Chamfer, and sample subspace alignment each reveal different failure modes.
+4. U-ViT-style hidden long skips inside the FCN do not, by themselves, fix the velocity/noise failure; they largely reproduce the plain FCN sample geometry.
+5. Patch architectures change the story: Transformer/Mixer no longer show the same final-layer effective-rank explosion, but they can still fail or partially fail for noise because architecture compresses and routes the signal differently.
+6. Stable rank alone is not enough; rank90, angles, activation/residual factorization, sample Chamfer, and sample subspace alignment each reveal different failure modes.
 
 For the detailed experiment log and interpretation, see [docs/PROJECT_SUMMARY.md](docs/PROJECT_SUMMARY.md).
 

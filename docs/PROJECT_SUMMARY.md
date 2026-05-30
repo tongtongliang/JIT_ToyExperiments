@@ -214,7 +214,71 @@ Interpretation:
 
 This is one of the strongest pieces of evidence that architectural parameterization can change the gradient-rank burden without changing the data distribution.
 
-## 8. Patch Transformer Sampling
+## 8. U-FCN Hidden Long-Skip Experiment
+
+Primary run:
+
+```text
+results/clean_jax_representation_ufcn/runs/repr_ufcn_D512_adamw_w256_d5_s100000_seed42_20260530_145856
+```
+
+Architecture change:
+
+```text
+5-block residual FCN with pre-norm AdaLN-zero
+U-ViT-style hidden long skips
+block1 output -> block5 input
+block2 output -> block4 input
+concat([decoder stream, encoder skip]) -> linear projection back to width
+```
+
+The skip projections are initialized as `[I, 0]`, so the initial hidden stream matches the no-skip FCN while still allowing the skip half to learn. This keeps the comparison close to the baseline FCN initialization.
+
+Default D=512 run:
+
+```text
+width = 256
+depth = 5
+steps = 100000
+optimizer = AdamW, lr = 1e-4, gradient clip = 1.0
+parameter count = 2,301,952
+```
+
+Sample results:
+
+| mode | final loss | ambient Chamfer | sample stable rank | sample rank95 | max subspace angle |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| x | 0.0252 | 0.4371 | 1.89 | 2 | 0.0062 deg |
+| v | 0.5298 | 30.5568 | 2.81 | 191 | 1.4838 deg |
+| eps | 4.6227 | 29371.3848 | 140.30 | 231 | 86.9758 deg |
+
+Comparison against the two closest FCN baselines:
+
+| model | mode | final loss | ambient Chamfer | sample rank95 | max subspace angle |
+| --- | --- | ---: | ---: | ---: | ---: |
+| FCN | x | 0.0251 | 0.2399 | 2 | 0.0117 deg |
+| FCN | v | 0.5305 | 30.5953 | 193 | 1.4691 deg |
+| FCN | eps | 4.6310 | 29333.1133 | 232 | 87.6185 deg |
+| U-FCN | x | 0.0252 | 0.4371 | 2 | 0.0062 deg |
+| U-FCN | v | 0.5298 | 30.5568 | 191 | 1.4838 deg |
+| U-FCN | eps | 4.6227 | 29371.3848 | 231 | 86.9758 deg |
+| FCN + learned output long skip | x | 0.0248 | 0.3184 | 2 | 0.0144 deg |
+| FCN + learned output long skip | v | 0.0249 | 0.7800 | 2 | 0.2298 deg |
+| FCN + learned output long skip | eps | 0.0256 | 10.5241 | 2 | 0.5613 deg |
+
+Interpretation:
+
+| observation | reading |
+| --- | --- |
+| U-FCN almost exactly reproduces the plain FCN behavior for `v` and `eps` | hidden long skips alone do not remove the output-parameterization bottleneck |
+| `x` still succeeds | the hidden skips do not damage clean prediction |
+| `v` still has high ambient Chamfer and high sample rank95 | U-style hidden feature reuse does not absorb the large linear-in-input velocity component |
+| `eps` still collapses to the wrong high-dimensional/noisy geometry | noise prediction remains a hard FCN parameterization problem |
+| learned output long skip remains dramatically better for `v/eps` | the successful intervention is specifically an output-level, time-dependent linear path, not merely a U-shaped hidden architecture |
+
+This is a useful negative result. It suggests that the FCN failure is not fixed by giving the hidden backbone more feature reuse. The important missing ingredient for velocity/noise prediction appears to be a direct route for the simple linear component of the target, as in the learned scalar output skip.
+
+## 9. Patch Transformer Sampling
 
 Primary completed 20k run:
 
@@ -253,7 +317,7 @@ Interpretation:
 | eps still has a severe subspace failure | low sample rank does not imply correct data-plane alignment |
 | eps rank95 can be low but wrong | the model may collapse to a low-dimensional but incorrect direction |
 
-## 9. Transformer Gradient Dynamics
+## 10. Transformer Gradient Dynamics
 
 Primary run:
 
@@ -301,7 +365,7 @@ Interpretation:
 
 This is an important correction to the original FCN story. The FCN mechanism is real, but it is architecture-dependent.
 
-## 10. MLP-Mixer Sampling
+## 11. MLP-Mixer Sampling
 
 Primary run:
 
@@ -337,7 +401,7 @@ Interpretation:
 | eps ambient Chamfer is still worse than x/v | correct subspace is not enough for good density/coverage |
 | Mixer-v is worse than Transformer-v in Chamfer but still much better than FCN-v | patch architectures help v in general |
 
-## 11. U-Net Status
+## 12. U-Net Status
 
 A Tiny 1D U-Net + AdaGN runner exists under:
 
@@ -357,14 +421,15 @@ parameter count around 2M
 
 This path is ready for GPU/server runs, but local Mac/MPS experiments were not pursued as heavily because the Transformer/Mixer path was simpler and faster to inspect.
 
-## 12. Current Main Pattern
+## 13. Current Main Pattern
 
 The experiments now suggest a sharper taxonomy:
 
 | model family | x prediction | v prediction | eps prediction | likely mechanism |
 | --- | --- | --- | --- | --- |
 | FCN | succeeds | ambient high-rank failure | severe failure | final-layer/optimizer high-rank burden |
-| FCN + learned long skip | succeeds | mostly fixed | much improved but imperfect | skip absorbs large linear term |
+| FCN + learned long skip | succeeds | mostly fixed | much improved but imperfect | output skip absorbs large linear term |
+| U-FCN hidden long skip | succeeds | same as FCN | same as FCN | hidden feature reuse does not absorb output-level linear burden |
 | Transformer | succeeds/moderate | much improved | low-rank wrong subspace collapse | patch/token compression and routing |
 | Mixer | succeeds/moderate | improved | better subspace, still worse Chamfer | token/channel MLP routes eps differently |
 
@@ -378,7 +443,7 @@ Sometimes failure is low-rank but wrong compression.
 
 This is why future analysis should always pair rank metrics with geometry metrics: Chamfer, subspace angle, sample rank, and representation stability.
 
-## 13. Practical Workflow Going Forward
+## 14. Practical Workflow Going Forward
 
 Use this discipline for new experiments:
 
@@ -390,7 +455,7 @@ Use this discipline for new experiments:
 6. Keep smoke/benchmark/full runs in separate output roots.
 7. Do not commit `results/` or checkpoints.
 
-## 14. Best Next Experiments
+## 15. Best Next Experiments
 
 The current most valuable next steps are:
 
@@ -399,11 +464,12 @@ The current most valuable next steps are:
 | run Transformer/Mixer longer on GPU | local 10k/20k may not represent converged behavior |
 | add gradient dynamics for Mixer | compare token mixing vs attention in rank90 and angle drift |
 | run U-Net on GPU | test whether locality plus multiscale mixing fixes v/eps more naturally |
-| extend long-skip design to Transformer/Mixer | test whether learned skip and patch architecture are complementary |
+| run gradient dynamics for U-FCN | verify whether hidden skips leave the same final-layer momentum/update ranks as the plain FCN |
+| extend output long-skip design to Transformer/Mixer | test whether learned skip and patch architecture are complementary |
 | add rank90/rank95 side-by-side in representation notebooks | prevent stable-rank-only interpretations |
 | analyze target decomposition algebraically for eps/v | connect residual geometry with observed optimizer ranks |
 
-## 15. Caveats
+## 16. Caveats
 
 | caveat | consequence |
 | --- | --- |
@@ -413,6 +479,6 @@ The current most valuable next steps are:
 | low rank is not automatically good | low-rank wrong-subspace collapse is a real failure mode |
 | precision/recall were removed from plots | current implementation was not reliable enough for paper-level claims |
 
-## 16. One-Sentence Summary
+## 17. One-Sentence Summary
 
 Clean prediction succeeds in the FCN because its early optimizer state sees stable low-dimensional directions; velocity/noise prediction can fail by forcing high-dimensional updates, but architecture and learned skip paths can transform that failure into a different regime where the model writes fewer directions yet may still compress the signal into the wrong geometry.
