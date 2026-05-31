@@ -245,6 +245,10 @@ def run_experiment(args: argparse.Namespace):
     device = pick_device(args.device)
     if device.type == "cpu":
         torch.set_num_threads(args.num_threads)
+    modes = tuple(mode.strip() for mode in args.modes.split(",") if mode.strip())
+    invalid_modes = sorted(set(modes) - set(MODES))
+    if invalid_modes:
+        raise ValueError(f"Unknown modes in --modes: {invalid_modes}. Expected subset of {MODES}.")
 
     resume_run_dir = Path(args.resume_run_dir) if args.resume_run_dir else None
     resume_checkpoints: dict[str, dict[str, Any]] = {}
@@ -252,9 +256,9 @@ def run_experiment(args: argparse.Namespace):
         data_path = resume_run_dir / "training_data_snapshot.npz"
         data = dict(np.load(data_path))
         resume_step_offset = args.resume_step_offset if args.resume_step_offset is not None else infer_step_offset(resume_run_dir)
-        for mode in MODES:
+        for mode in modes:
             resume_checkpoints[mode] = torch.load(resume_run_dir / "checkpoints" / f"{mode}_final.pt", map_location=device)
-        model_cfg = config_from_checkpoint(resume_checkpoints["x"])
+        model_cfg = config_from_checkpoint(next(iter(resume_checkpoints.values())))
     else:
         data_path, data = get_or_create_dataset(output_root, args.ambient_dim, args.n_samples, args.data_noise, args.seed)
         resume_step_offset = 0
@@ -301,7 +305,7 @@ def run_experiment(args: argparse.Namespace):
     metadata = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "data_path": str(data_path),
-        "modes": list(MODES),
+        "modes": list(modes),
         "experiment_type": "torch_mixer1d_sampling_training",
         "optimizer": "AdamW",
         "device": str(device),
@@ -323,7 +327,7 @@ def run_experiment(args: argparse.Namespace):
     x0_all = torch.as_tensor(data["x0"], dtype=torch.float32, device=device)
     models: dict[str, TinyAdaLNMixer1D] = {}
     all_rows: list[dict[str, Any]] = []
-    for mode in MODES:
+    for mode in modes:
         print(f"\n{'=' * 90}\nTorch Mixer1D training mode={mode}\n{'=' * 90}", flush=True)
         model, opt, rows = train_mode(
             mode,
@@ -386,6 +390,7 @@ def build_argparser():
     p.add_argument("--save-checkpoints", action="store_true")
     p.add_argument("--resume-run-dir", default=None, help="Continue from a previous run directory containing checkpoints and training_data_snapshot.npz.")
     p.add_argument("--resume-step-offset", type=int, default=None, help="Global step offset for resumed logs. Defaults to max step in the previous loss.csv.")
+    p.add_argument("--modes", default="x,v,eps", help="Comma-separated prediction modes to train, in execution order. Default: x,v,eps.")
     return p
 
 
