@@ -1,6 +1,6 @@
 # Project Summary: Diffusion Toy Inductive Bias Experiments
 
-Last updated: 2026-05-27.
+Last updated: 2026-05-30.
 
 This document summarizes the current clean version of the project after the repository was reorganized into package code, script entry points, notebooks, and local result folders.
 
@@ -434,7 +434,25 @@ This path is ready for GPU/server runs, but local Mac/MPS experiments were not p
 
 ## 13. Current Main Pattern
 
-The experiments now suggest a sharper taxonomy:
+The experiments now suggest a sharper taxonomy. The most useful compact summary is:
+
+| model family | x result | v result | eps result | main reading |
+| --- | --- | --- | --- | --- |
+| FCN | Chamfer 0.24, angle 0.01 deg | Chamfer 30.60, rank95 193, angle 1.47 deg | Chamfer 29333, rank95 232, angle 87.62 deg | clean prediction works; v leaks into many ambient directions; eps fails catastrophically |
+| FCN + learned output long skip | Chamfer 0.32, angle 0.01 deg | Chamfer 0.78, rank95 2, angle 0.23 deg | Chamfer 10.52, rank95 2, angle 0.56 deg | a learned output-level linear path removes most of the v/eps burden |
+| U-FCN hidden long skip | Chamfer 0.44, angle 0.006 deg | Chamfer 30.56, rank95 191, angle 1.48 deg | Chamfer 29371, rank95 231, angle 86.98 deg | hidden U-style feature reuse does not fix the FCN parameterization failure |
+| Transformer 20k | Chamfer 0.83, angle 0.55 deg | Chamfer 2.48, rank95 2, angle 0.73 deg | Chamfer 5.74, rank95 1, angle 88.19 deg | patch attention improves v but eps can become low-rank wrong-subspace collapse |
+| Mixer 20k | Chamfer 0.55, angle 0.30 deg | Chamfer 1.05, rank95 2, angle 0.36 deg | Chamfer 1.47, rank95 2, angle 0.57 deg | token/channel MLP mixing eventually routes all modes into a near-correct 2D geometry |
+
+This table is the current best high-level view. It separates three distinct phenomena that were initially easy to conflate:
+
+| phenomenon | where it appears | interpretation |
+| --- | --- | --- |
+| high-rank writing burden | FCN-v and FCN-eps gradient dynamics | the optimizer must write many output directions into a plain MLP |
+| wrong low-rank compression | Transformer-eps sampling | the model can produce low-rank samples that are geometrically misaligned |
+| successful architectural rerouting | output long-skip FCN and Mixer 20k | the architecture can absorb or route v/eps structure into a correct low-dimensional solution |
+
+The architecture-level taxonomy is:
 
 | model family | x prediction | v prediction | eps prediction | likely mechanism |
 | --- | --- | --- | --- | --- |
@@ -492,4 +510,4 @@ The current most valuable next steps are:
 
 ## 17. One-Sentence Summary
 
-Clean prediction succeeds in the FCN because its early optimizer state sees stable low-dimensional directions; velocity/noise prediction can fail by forcing high-dimensional updates, but architecture and learned skip paths can transform that failure into a different regime where the model writes fewer directions yet may still compress the signal into the wrong geometry.
+Clean prediction succeeds in the plain FCN because its early optimizer state sees stable low-dimensional directions; velocity/noise prediction can fail either by forcing high-rank output updates or by being compressed into the wrong subspace, while output-level learned skips and Mixer-style token/channel mixing show that architecture can reroute the same targets into a near-correct low-dimensional geometry.

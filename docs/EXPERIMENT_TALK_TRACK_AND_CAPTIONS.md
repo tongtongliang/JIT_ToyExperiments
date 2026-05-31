@@ -1,5 +1,7 @@
 # Talk Track and Figure Captions for the Toy Diffusion Inductive-Bias Experiments
 
+Last updated: 2026-05-30.
+
 This note is written as collaborator-facing language. It is meant to help explain the experiment verbally while showing figures, videos, or notebook outputs. The goal is not to be maximally formal, but to make the motivation, design, and interpretation easy to communicate.
 
 ## 1. One-Minute Overview
@@ -14,17 +16,27 @@ z_t = (1 - t) x + t eps.
 
 We train three otherwise identical models. The only difference is how the network output is interpreted: clean prediction, velocity prediction, or noise prediction. The loss is kept in a common velocity-objective form, so the comparison is about parameterization and gradient dynamics rather than changing the training target arbitrarily.
 
-The main hypothesis is that the advantage of clean prediction is not just an expressivity story. It is an optimization-dynamics story. Early in training, clean prediction exposes stable low-dimensional signal directions, while velocity or noise prediction can expose higher-dimensional or less stable residual directions. AdamW momentum then accumulates these directions differently. Architecture can also change this effect: a fully connected network, a learned long-skip network, and a patch Transformer do not write the same information into their parameters.
+The main hypothesis is that the advantage of clean prediction is not just an expressivity story. It is an optimization-dynamics story. Early in training, clean prediction exposes stable low-dimensional signal directions, while velocity or noise prediction can expose higher-dimensional or less stable residual directions. AdamW momentum then accumulates these directions differently. Architecture can also change this effect: a plain fully connected network, an output-level learned long skip, a hidden U-style skip FCN, a patch Transformer, and a patch Mixer write very different information into their parameters.
+
+The current headline is that there is not just one failure mode. The experiments now separate at least three mechanisms:
+
+| mechanism | where we see it | short interpretation |
+| --- | --- | --- |
+| high-rank writing burden | plain FCN with `v` or `eps` prediction | the final layer and optimizer state must write many ambient directions |
+| wrong low-rank compression | Transformer with `eps` prediction | the model produces a low-dimensional sample cloud, but in the wrong subspace |
+| successful architectural rerouting | learned output long-skip FCN and 20k-step Mixer | the architecture routes `v/eps` into a near-correct low-dimensional geometry |
+
+The newest negative control is also important: U-FCN hidden long skips do not fix the FCN failure. That suggests the useful skip is not generic feature reuse, but a direct output-level route for a simple time-dependent linear component.
 
 ## 2. Short Talk Track
 
 A compact way to introduce the project is:
 
-> The experiment asks whether the success of clean prediction comes from the geometry of the target alone, or from the way the target shapes early gradient dynamics. We take the same high-dimensional corrupted inputs and train matched models under three output parameterizations: predict clean data `x`, predict velocity `v`, or predict noise `eps`. Because the clean data lie on a low-dimensional manifold, clean prediction tends to produce stable low-rank residual structure. We then test whether this stability shows up in the gradient, AdamW momentum, and actual parameter updates. The key object is not only the final sample quality, but what directions the optimizer writes into the model during early training.
+> The experiment asks whether the success of clean prediction comes from the geometry of the target alone, or from the way the target shapes early gradient dynamics and architectural routing. We take the same high-dimensional corrupted inputs and train matched models under three output parameterizations: predict clean data `x`, predict velocity `v`, or predict noise `eps`. Because the clean data lie on a low-dimensional manifold, clean prediction tends to produce stable low-rank residual structure. We then test whether this stability shows up in the gradient, AdamW momentum, actual parameter updates, hidden representations, and final sample geometry. The key object is not only whether the final samples are low-rank, but whether the optimizer and architecture write the right directions into the model.
 
 A slightly more informal version:
 
-> I want to separate two explanations that are easy to conflate. One explanation says clean prediction works because the clean target is low-dimensional and noise is high-dimensional. That is true but incomplete. The more mechanistic explanation is that clean prediction gives the optimizer a stable low-dimensional signal early in training, while noise or velocity prediction can make the optimizer chase directions that are high-dimensional, unstable, or poorly routed by the architecture. The diagnostics here are designed to see that mechanism directly.
+> I want to separate explanations that are easy to conflate. One explanation says clean prediction works because the clean target is low-dimensional and noise is high-dimensional. That is true but incomplete. The more mechanistic explanation is that clean prediction gives the optimizer a stable low-dimensional signal early in training, while noise or velocity prediction can make the optimizer chase directions that are high-dimensional, unstable, or poorly routed by the architecture. The newest runs make this sharper: plain FCNs fail through high-rank ambient writing, Transformer noise prediction can fail through wrong low-rank compression, and Mixer or output-skip architectures can reroute the same target into the correct low-dimensional geometry.
 
 ## 3. Experimental Design
 
@@ -65,9 +77,20 @@ We then compare against architectural variants:
 | --- | --- |
 | FCN | clean baseline where the gradient mechanism is easiest to inspect |
 | FCN + learned long skip | tests whether a learned linear-in-input path can absorb difficult velocity/noise structure |
-| Patch Transformer | tests whether patch/token structure changes the rank and routing story |
-| MLP-Mixer | tests whether token mixing without attention changes the geometry |
+| U-FCN hidden long skip | negative control for U-ViT-style hidden feature reuse |
+| Patch Transformer | tests whether attention-based patch/token structure changes the rank and routing story |
+| MLP-Mixer | tests whether token and channel mixing without attention can route the geometry |
 | Tiny 1D U-Net | planned/server-oriented architecture comparison for locality and multiscale mixing |
+
+The latest model-level summary is:
+
+| model family | `x` | `v` | `eps` | takeaway |
+| --- | --- | --- | --- | --- |
+| plain FCN | succeeds | high ambient leakage | catastrophic wrong geometry | clean prediction has a favorable FCN gradient signature |
+| learned output-skip FCN | succeeds | mostly fixed | much improved | a direct time-dependent linear output route removes the hardest burden |
+| U-FCN hidden skip | succeeds | same failure as FCN | same failure as FCN | hidden feature reuse alone is not the missing ingredient |
+| Transformer 20k | moderate success | much better than FCN | low-rank wrong subspace | patch attention changes the failure mode |
+| Mixer 20k | succeeds | near-correct | near-correct | token/channel mixing can eventually solve all three modes in this toy setup |
 
 ### Optimizer and Control Variables
 
@@ -315,6 +338,16 @@ Oral interpretation:
 
 > The long skip is a way to test whether the FCN failure comes from making the network learn a large, simple, time-dependent linear component through ordinary hidden layers. If the skip absorbs that component, velocity prediction becomes much easier and the last-layer gradient rank collapses.
 
+### U-FCN Hidden-Skip Plots
+
+Suggested caption:
+
+> U-FCN adds U-ViT-style hidden long skips to the same five-block FCN: block 1 feeds block 5 and block 2 feeds block 4. The skip projections are initialized so that the network starts close to the original FCN, then can learn to reuse hidden features if that helps.
+
+Key interpretation:
+
+> This is a negative control. If generic hidden feature reuse were enough, U-FCN should improve velocity or noise prediction. It does not: the `v` and `eps` sample metrics remain almost identical to the plain FCN. This suggests that the successful long-skip intervention works because it provides an output-level time-dependent linear route, not because it merely makes the hidden network more U-shaped.
+
 ### Transformer Gradient-Rank Plots
 
 Suggested caption:
@@ -323,7 +356,17 @@ Suggested caption:
 
 Key interpretation:
 
-> The Transformer does not simply reproduce the FCN story. In the FCN, velocity and noise produce a high-rank burden at the final layer. In the Transformer, the final output rank can be small, and the effective rank is distributed across internal matrices, especially the MLP-up projections. This suggests that architecture changes the mechanism from high-rank writing at the output layer to routing and compression across patch/token features.
+> The Transformer does not simply reproduce the FCN story. In the FCN, velocity and noise produce a high-rank burden at the final layer. In the Transformer, the final output rank can be small, and the effective rank is distributed across internal matrices, especially the MLP-up projections. This suggests that architecture changes the mechanism from high-rank writing at the output layer to routing and compression across patch/token features. The important warning is that Transformer `eps` can be low-rank and still wrong: its samples collapse into a subspace that is not the data plane.
+
+### Mixer 20k Sample Plots
+
+Suggested caption:
+
+> The MLP-Mixer uses the same patchification idea as the Transformer but replaces attention with token and channel MLPs. Continuing the Mixer run from 10k to 20k steps substantially improves all three prediction modes: `x`, `v`, and `eps` all produce rank95=2 sample clouds close to the true data plane.
+
+Key interpretation:
+
+> Mixer changes the conclusion from the 10k snapshot. At 10k, `eps` still looked noticeably worse. At 20k, its ambient Chamfer and subspace angle drop sharply. This means noise prediction is not intrinsically impossible in the toy problem; it depends on whether the architecture and training time can route the signal into the correct low-dimensional geometry.
 
 ## 6. Main Empirical Messages
 
@@ -337,7 +380,7 @@ Suggested wording:
 
 Suggested wording:
 
-> Velocity prediction can sometimes find the correct projected manifold while still having large ambient error. Noise prediction can collapse to a low-dimensional but wrong subspace. These are different failure modes, so we should not summarize everything as simply high-dimensional noise being hard.
+> Velocity prediction can find the correct projected manifold while still leaking into many ambient directions. Noise prediction can either fail catastrophically in a plain FCN or collapse to a low-dimensional but wrong subspace in a Transformer. These are different failure modes, so we should not summarize everything as simply high-dimensional noise being hard.
 
 ### Message 3: The learned long skip changes the mechanism.
 
@@ -349,9 +392,21 @@ Suggested wording:
 
 Suggested wording:
 
-> The patch Transformer and Mixer do not show the same last-layer rank explosion as the FCN. This means the FCN gradient story is real but architecture-dependent. Patch/token structure can compress or reroute the difficult directions. However, low-rank compression is not automatically good: for example, noise prediction can become low-rank but aligned with the wrong subspace.
+> The patch Transformer does not show the same last-layer rank explosion as the FCN, and the Mixer sampling results show that token/channel mixing can route the same targets into much better sample geometry. This means the FCN gradient story is real but architecture-dependent. Patch/token structure can compress or reroute the difficult directions. However, low-rank compression is not automatically good: Transformer noise prediction becomes low-rank but aligned with the wrong subspace.
 
-### Message 5: Rank must be paired with geometry.
+### Message 5: U-FCN hidden skips are an important negative control.
+
+Suggested wording:
+
+> Adding U-ViT-style hidden long skips to the FCN does not fix velocity or noise prediction. The result is almost identical to the plain FCN. This tells us that the useful long-skip mechanism is not generic hidden feature reuse. The successful intervention is specifically an output-level, time-dependent linear path.
+
+### Message 6: Mixer 20k shows that noise prediction can be rerouted successfully.
+
+Suggested wording:
+
+> The 20k-step Mixer run is the strongest counterpoint to a simple target-dimension story. With enough training, token/channel mixing recovers near-correct low-dimensional sample geometry for `x`, `v`, and `eps`. This suggests that noise prediction can work when the architecture provides the right routing bias.
+
+### Message 7: Rank must be paired with geometry.
 
 Suggested wording:
 
@@ -387,6 +442,14 @@ Suggested wording:
 
 > Patch Transformer diagnostics show a different mechanism. The final projection no longer carries the same high-rank burden; instead, rank is distributed across internal patch and channel-mixing matrices. This indicates that the implicit bias depends strongly on architecture.
 
+### Panel H: U-FCN Hidden-Skip Negative Control
+
+> U-FCN adds hidden long skips between early and late FCN blocks, analogous to the high-level U-ViT idea. The resulting `v` and `eps` behavior remains almost unchanged from the plain FCN. This negative result suggests that hidden feature reuse is not enough; the key successful skip is the learned output-level linear route.
+
+### Panel I: Mixer 20k Architecture Comparison
+
+> The Mixer uses patch tokenization with token and channel MLPs instead of attention. After 20k steps, it recovers near-correct low-dimensional sample geometry for all three prediction modes. This shows that architecture can do more than avoid high-rank failure: it can actively reroute velocity and noise prediction into the correct data plane.
+
 ## 8. Common Questions and Suggested Answers
 
 ### Why not just say noise is high-dimensional and clean data are low-dimensional?
@@ -409,12 +472,20 @@ Suggested wording:
 
 > It shows that the FCN's failure is not fixed by capacity alone. A small architectural reparameterization that gives the model a direct time-dependent linear path can dramatically change both sampling quality and gradient rank. That points to an implicit-bias and parameterization effect.
 
+### Why does U-FCN not fix the FCN failure?
+
+> U-FCN gives the hidden backbone more feature reuse, but it does not give the output a direct time-dependent linear path from the corrupted input. Velocity and noise prediction contain large simple linear components in `z_t`, `x`, and `eps`; forcing those components through ordinary hidden layers still leaves the same output-parameterization burden. This is why U-FCN looks almost identical to the plain FCN for `v` and `eps`.
+
 ### What does the Transformer teach us?
 
 > It shows that the FCN mechanism is architecture-dependent. Patch/token models can avoid the FCN's final-layer high-rank burden, but they may introduce a different failure mode: routing or compressing the signal into the wrong geometric subspace.
+
+### What does the Mixer 20k run teach us?
+
+> It shows that the patch/token story is not only negative. The Transformer `eps` run warns us that low-rank compression can be wrong, but the 20k Mixer run shows that token/channel mixing can eventually align `x`, `v`, and `eps` with the true 2D data plane. So the question becomes: which architectural routes turn the same diffusion target into a stable, correctly aligned low-dimensional computation?
 
 ## 9. Final Takeaway
 
 A concise final takeaway for collaborators:
 
-> These toy experiments suggest that prediction parameterization changes the early optimization geometry. Clean prediction gives the optimizer stable low-dimensional directions in a plain FCN. Velocity and noise prediction can force the optimizer to write many directions, unless the architecture provides a better route such as a learned long skip or patch/token structure. But architecture can also over-compress the signal, so low rank by itself is not success. The right interpretation requires connecting gradient rank, optimizer momentum, hidden representation stability, and final sample geometry.
+> These toy experiments suggest that prediction parameterization changes the early optimization geometry, but architecture decides how that geometry is routed. In a plain FCN, clean prediction gives AdamW stable low-dimensional directions, while velocity and noise prediction impose a high-rank output-update burden. A learned output long skip removes much of that burden, while a hidden U-FCN skip does not. Patch architectures change the mechanism again: a Transformer can compress noise prediction into the wrong low-dimensional subspace, while a 20k-step Mixer can route all three prediction modes into a near-correct 2D geometry. The right interpretation requires connecting gradient rank, optimizer momentum, hidden representation stability, Chamfer distance, and sample subspace angle.

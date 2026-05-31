@@ -266,7 +266,7 @@ The short version is:
 2. FCN velocity/noise prediction can write high-dimensional directions into the last layer and optimizer momentum.
 3. A learned long skip dramatically helps velocity prediction and partially helps noise prediction by letting the model represent large linear-in-`z_t` terms directly.
 4. U-ViT-style hidden long skips inside the FCN do not, by themselves, fix the velocity/noise failure; they largely reproduce the plain FCN sample geometry.
-5. Patch architectures change the story: Transformer/Mixer no longer show the same final-layer effective-rank explosion, but they can still fail or partially fail for noise because architecture compresses and routes the signal differently.
+5. Patch architectures change the story: Transformer gradient diagnostics do not reproduce the FCN final-layer rank explosion, while Mixer 20k shows that token/channel mixing can route `x`, `v`, and `eps` into near-correct low-dimensional sample geometry.
 6. Stable rank alone is not enough; rank90, angles, activation/residual factorization, sample Chamfer, and sample subspace alignment each reveal different failure modes.
 
 For the detailed experiment log and interpretation, see [docs/PROJECT_SUMMARY.md](docs/PROJECT_SUMMARY.md).
