@@ -367,10 +367,16 @@ This is an important correction to the original FCN story. The FCN mechanism is 
 
 ## 11. MLP-Mixer Sampling
 
-Primary run:
+Primary 10k run:
 
 ```text
 results/torch_mixer1d_sampling_mps_10k/runs/torch_mixer1d_D512_adamw_p8_d128_L5_tm128_cm512_steps10000_seed42_20260526_104530
+```
+
+20k resumed run:
+
+```text
+results/torch_mixer1d_sampling_mps_20k/runs/torch_mixer1d_resume_D512_adamw_p8_d128_L5_tm128_cm512_from10000_to20000_seed42_20260530_210051
 ```
 
 Architecture:
@@ -387,19 +393,24 @@ AdaLN-zero conditioning
 
 Sample results:
 
-| mode | final loss | ambient Chamfer | sample rank95 | max subspace angle |
-| --- | ---: | ---: | ---: | ---: |
-| x | 0.0284 | 0.6657 | 2 | 0.5290 deg |
-| v | 0.0438 | 3.2419 | 2 | 0.5806 deg |
-| eps | 0.0482 | 10.8002 | 2 | 2.3339 deg |
+| run | mode | final loss | ambient Chamfer | sample rank95 | max subspace angle |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Mixer 10k | x | 0.0284 | 0.6657 | 2 | 0.5290 deg |
+| Mixer 10k | v | 0.0438 | 3.2419 | 2 | 0.5806 deg |
+| Mixer 10k | eps | 0.0482 | 10.8002 | 2 | 2.3339 deg |
+| Mixer 20k | x | 0.0279 | 0.5544 | 2 | 0.2951 deg |
+| Mixer 20k | v | 0.0324 | 1.0531 | 2 | 0.3566 deg |
+| Mixer 20k | eps | 0.0328 | 1.4664 | 2 | 0.5744 deg |
 
 Interpretation:
 
 | observation | reading |
 | --- | --- |
-| Mixer improves eps subspace alignment compared with Transformer | token mixing without attention may avoid one type of eps collapse |
-| eps ambient Chamfer is still worse than x/v | correct subspace is not enough for good density/coverage |
-| Mixer-v is worse than Transformer-v in Chamfer but still much better than FCN-v | patch architectures help v in general |
+| continuing Mixer from 10k to 20k substantially improves all three modes | this architecture was not saturated at 10k |
+| eps ambient Chamfer drops from 10.80 to 1.47 | Mixer eventually learns a much better noise-prediction geometry than the 10k snapshot suggested |
+| eps subspace angle drops from 2.33 deg to 0.57 deg | the generated eps-prediction samples are now close to the true 2D data plane |
+| v ambient Chamfer drops from 3.24 to 1.05 | token/channel mixing continues improving velocity prediction with more steps |
+| all modes remain rank95=2 at 20k | Mixer learns low-dimensional sample clouds for x, v, and eps |
 
 ## 12. U-Net Status
 
@@ -431,7 +442,7 @@ The experiments now suggest a sharper taxonomy:
 | FCN + learned long skip | succeeds | mostly fixed | much improved but imperfect | output skip absorbs large linear term |
 | U-FCN hidden long skip | succeeds | same as FCN | same as FCN | hidden feature reuse does not absorb output-level linear burden |
 | Transformer | succeeds/moderate | much improved | low-rank wrong subspace collapse | patch/token compression and routing |
-| Mixer | succeeds/moderate | improved | better subspace, still worse Chamfer | token/channel MLP routes eps differently |
+| Mixer 20k | succeeds/moderate | strong improvement | strong improvement, near-correct subspace | token/channel MLP eventually routes v/eps into the right low-dimensional geometry |
 
 The main conceptual shift is:
 
