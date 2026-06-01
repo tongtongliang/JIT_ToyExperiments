@@ -166,6 +166,10 @@ def train_mode(mode: str, init_params_tree, x0_all, model_cfg: ModelConfig, trai
 def run_experiment(args: argparse.Namespace):
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    modes = tuple(mode.strip() for mode in args.modes.split(",") if mode.strip())
+    invalid_modes = sorted(set(modes) - set(MODES))
+    if invalid_modes:
+        raise ValueError(f"Unknown modes in --modes: {invalid_modes}. Expected subset of {MODES}.")
     data_path, data = get_or_create_dataset(output_root, args.ambient_dim, args.n_samples, args.data_noise, args.seed)
 
     model_cfg = ModelConfig(
@@ -195,7 +199,7 @@ def run_experiment(args: argparse.Namespace):
     metadata = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "data_path": str(data_path),
-        "modes": list(MODES),
+        "modes": list(modes),
         "experiment_type": "representation_training",
         "optimizer": "adamw_manual",
         "model_config": asdict(model_cfg),
@@ -211,7 +215,7 @@ def run_experiment(args: argparse.Namespace):
     params_by_mode: dict[str, Any] = {}
     all_loss_rows: list[dict[str, Any]] = []
 
-    for mode in MODES:
+    for mode in modes:
         print(f"\n{'=' * 90}\nRepresentation training mode={mode}\n{'=' * 90}", flush=True)
         params, opt_state, rows = train_mode(mode, init, x0_all, model_cfg, train_cfg, seed=args.seed + 1000)
         params_by_mode[mode] = params
@@ -256,6 +260,7 @@ def build_argparser():
     p.add_argument("--fast-chunk-size", type=int, default=1000)
     p.add_argument("--grad-clip-norm", type=float, default=1.0)
     p.add_argument("--save-checkpoints", action="store_true")
+    p.add_argument("--modes", default="x,v,eps", help="Comma-separated prediction modes to train, in execution order. Default: x,v,eps.")
     return p
 
 
