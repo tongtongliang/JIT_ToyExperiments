@@ -28,7 +28,9 @@ from scripts.architectures.run_mixer1d_torch_experiment import (
 )
 from scripts.architectures.run_transformer1d_torch_experiment import (
     MODES,
+    TinyAdaLNTransformer1D,
     TorchTrainConfig,
+    TorchTransformerConfig,
     count_params,
     make_batch,
     pick_device,
@@ -281,6 +283,20 @@ def build_model(model_name: str, args: argparse.Namespace) -> tuple[nn.Module, d
             zero_init_output=True,
         )
         return TinyAdaLNMixer1D(cfg), asdict(cfg)
+    if model_name == "transformer":
+        cfg = TorchTransformerConfig(
+            ambient_dim=args.ambient_dim,
+            patch_size=args.transformer_patch_size,
+            dim=args.transformer_dim,
+            depth=args.transformer_depth,
+            heads=args.transformer_heads,
+            mlp_width=args.transformer_mlp_width,
+            time_embed_dim=args.time_embed_dim,
+            time_width=args.transformer_time_width,
+            zero_init_output=True,
+            attention_impl=args.transformer_attention_impl,
+        )
+        return TinyAdaLNTransformer1D(cfg), asdict(cfg)
     raise ValueError(f"unknown model: {model_name}")
 
 
@@ -351,7 +367,7 @@ def run_experiment(args: argparse.Namespace):
 
     models = parse_csv(args.models)
     modes = parse_csv(args.modes)
-    invalid_models = sorted(set(models) - {"fcn", "mixer"})
+    invalid_models = sorted(set(models) - {"fcn", "mixer", "transformer"})
     invalid_modes = sorted(set(modes) - set(MODES))
     if invalid_models:
         raise ValueError(f"Unknown models: {invalid_models}")
@@ -405,6 +421,15 @@ def run_experiment(args: argparse.Namespace):
             "token_mlp_width": args.mixer_token_mlp_width,
             "channel_mlp_width": args.mixer_channel_mlp_width,
             "time_width": args.mixer_time_width,
+        },
+        "transformer_config": {
+            "patch_size": args.transformer_patch_size,
+            "dim": args.transformer_dim,
+            "depth": args.transformer_depth,
+            "heads": args.transformer_heads,
+            "mlp_width": args.transformer_mlp_width,
+            "time_width": args.transformer_time_width,
+            "attention_impl": args.transformer_attention_impl,
         },
         "notes": "Per-sample gradients are reduced immediately into sum gradients and sum squared norms; no per-sample gradient matrix is saved.",
     }
@@ -489,7 +514,7 @@ def build_argparser():
     p = argparse.ArgumentParser(description="Measure per-sample gradient noise scale for toy diffusion prediction modes.")
     p.add_argument("--output-root", default="results/gradient_noise_scale")
     p.add_argument("--run-name", default=None)
-    p.add_argument("--models", default="fcn,mixer", help="Comma-separated subset/order of: fcn,mixer")
+    p.add_argument("--models", default="fcn,mixer", help="Comma-separated subset/order of: fcn,mixer,transformer")
     p.add_argument("--modes", default="x,v,eps", help="Comma-separated subset/order of: x,v,eps")
     p.add_argument("--ambient-dim", type=int, default=512)
     p.add_argument("--n-samples", type=int, default=8192)
@@ -515,6 +540,13 @@ def build_argparser():
     p.add_argument("--mixer-token-mlp-width", type=int, default=128)
     p.add_argument("--mixer-channel-mlp-width", type=int, default=512)
     p.add_argument("--mixer-time-width", type=int, default=256)
+    p.add_argument("--transformer-patch-size", type=int, default=8)
+    p.add_argument("--transformer-dim", type=int, default=128)
+    p.add_argument("--transformer-depth", type=int, default=5)
+    p.add_argument("--transformer-heads", type=int, default=1)
+    p.add_argument("--transformer-mlp-width", type=int, default=512)
+    p.add_argument("--transformer-time-width", type=int, default=256)
+    p.add_argument("--transformer-attention-impl", choices=("torch", "manual"), default="torch")
     p.add_argument("--save-pdf", action="store_true")
     return p
 
