@@ -38,6 +38,10 @@ from scripts.architectures.run_transformer1d_torch_experiment import (
     sinusoidal_embedding,
     write_csv,
 )
+from scripts.architectures.run_unet1d_torch_experiment import (
+    TinyUNet1D,
+    TorchUNetConfig,
+)
 
 
 MODE_COLORS = {"x": "#1f77b4", "v": "#009E73", "eps": "#D55E00"}
@@ -297,6 +301,21 @@ def build_model(model_name: str, args: argparse.Namespace) -> tuple[nn.Module, d
             attention_impl=args.transformer_attention_impl,
         )
         return TinyAdaLNTransformer1D(cfg), asdict(cfg)
+    if model_name == "unet":
+        cfg = TorchUNetConfig(
+            ambient_dim=args.ambient_dim,
+            patch_size=args.unet_patch_size,
+            stride=args.unet_stride,
+            base_channels=args.unet_base_channels,
+            channel_mults=tuple(args.unet_channel_mults),
+            blocks_per_level=args.unet_blocks_per_level,
+            kernel_size=args.unet_kernel_size,
+            time_embed_dim=args.time_embed_dim,
+            time_width=args.unet_time_width,
+            groups=args.unet_groups,
+            zero_init_output=True,
+        )
+        return TinyUNet1D(cfg), asdict(cfg)
     raise ValueError(f"unknown model: {model_name}")
 
 
@@ -367,7 +386,7 @@ def run_experiment(args: argparse.Namespace):
 
     models = parse_csv(args.models)
     modes = parse_csv(args.modes)
-    invalid_models = sorted(set(models) - {"fcn", "mixer", "transformer"})
+    invalid_models = sorted(set(models) - {"fcn", "mixer", "transformer", "unet"})
     invalid_modes = sorted(set(modes) - set(MODES))
     if invalid_models:
         raise ValueError(f"Unknown models: {invalid_models}")
@@ -430,6 +449,16 @@ def run_experiment(args: argparse.Namespace):
             "mlp_width": args.transformer_mlp_width,
             "time_width": args.transformer_time_width,
             "attention_impl": args.transformer_attention_impl,
+        },
+        "unet_config": {
+            "patch_size": args.unet_patch_size,
+            "stride": args.unet_stride,
+            "base_channels": args.unet_base_channels,
+            "channel_mults": list(args.unet_channel_mults),
+            "blocks_per_level": args.unet_blocks_per_level,
+            "kernel_size": args.unet_kernel_size,
+            "time_width": args.unet_time_width,
+            "groups": args.unet_groups,
         },
         "notes": "Per-sample gradients are reduced immediately into sum gradients and sum squared norms; no per-sample gradient matrix is saved.",
     }
@@ -514,7 +543,7 @@ def build_argparser():
     p = argparse.ArgumentParser(description="Measure per-sample gradient noise scale for toy diffusion prediction modes.")
     p.add_argument("--output-root", default="results/gradient_noise_scale")
     p.add_argument("--run-name", default=None)
-    p.add_argument("--models", default="fcn,mixer", help="Comma-separated subset/order of: fcn,mixer,transformer")
+    p.add_argument("--models", default="fcn,mixer", help="Comma-separated subset/order of: fcn,mixer,transformer,unet")
     p.add_argument("--modes", default="x,v,eps", help="Comma-separated subset/order of: x,v,eps")
     p.add_argument("--ambient-dim", type=int, default=512)
     p.add_argument("--n-samples", type=int, default=8192)
@@ -547,6 +576,14 @@ def build_argparser():
     p.add_argument("--transformer-mlp-width", type=int, default=512)
     p.add_argument("--transformer-time-width", type=int, default=256)
     p.add_argument("--transformer-attention-impl", choices=("torch", "manual"), default="torch")
+    p.add_argument("--unet-patch-size", type=int, default=4)
+    p.add_argument("--unet-stride", type=int, default=2)
+    p.add_argument("--unet-base-channels", type=int, default=56)
+    p.add_argument("--unet-channel-mults", type=int, nargs="+", default=[1, 2, 3])
+    p.add_argument("--unet-blocks-per-level", type=int, default=2)
+    p.add_argument("--unet-kernel-size", type=int, default=3)
+    p.add_argument("--unet-time-width", type=int, default=256)
+    p.add_argument("--unet-groups", type=int, default=8)
     p.add_argument("--save-pdf", action="store_true")
     return p
 
