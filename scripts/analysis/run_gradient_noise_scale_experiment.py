@@ -32,7 +32,6 @@ from scripts.architectures.run_transformer1d_torch_experiment import (
     TorchTrainConfig,
     TorchTransformerConfig,
     count_params,
-    make_batch,
     pick_device,
     pred_to_velocity_torch,
     sinusoidal_embedding,
@@ -122,6 +121,30 @@ def batch_loss(model: nn.Module, batch, mode: str, t_min: float) -> torch.Tensor
     v_target = eps - x0
     v_pred = pred_to_velocity_torch(raw, z_t, t, mode, t_min)
     return F.mse_loss(v_pred, v_target)
+
+
+def make_gns_batch(
+    x0_all: torch.Tensor,
+    cfg: TorchTrainConfig,
+    generator: torch.Generator,
+    device: torch.device,
+    t_sampling: str,
+    t_shift: float,
+):
+    idx = torch.randint(0, x0_all.shape[0], (cfg.batch_size,), generator=generator, device=device)
+    x0 = x0_all[idx]
+    if t_sampling == "sigmoid_normal":
+        t = torch.randn((cfg.batch_size,), generator=generator, device=device).sigmoid()
+    elif t_sampling in {"logit_normal_shift", "log_normal_shift"}:
+        t = (torch.randn((cfg.batch_size,), generator=generator, device=device) + t_shift).sigmoid()
+    elif t_sampling == "uniform":
+        t = torch.rand((cfg.batch_size,), generator=generator, device=device) * (1.0 - 2.0 * cfg.t_min) + cfg.t_min
+    else:
+        raise ValueError(f"unknown t_sampling: {t_sampling}")
+    t = t.clamp(cfg.t_min, 1.0 - cfg.t_min)
+    eps = torch.randn(x0.shape, generator=generator, device=device)
+    z_t = (1.0 - t[:, None]) * x0 + t[:, None] * eps
+    return x0, eps, t, z_t
 
 
 def zeros_like_named_params(params: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -402,6 +425,7 @@ def run_experiment(args: argparse.Namespace):
         loss_every=1,
         print_every=args.print_every,
         grad_clip_norm=args.grad_clip_norm,
+        t_sampling=args.t_sampling,
     )
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -425,6 +449,8 @@ def run_experiment(args: argparse.Namespace):
         "metric": "tr(per-sample gradient covariance) / ||mean per-sample gradient||^2",
         "estimator": args.estimator,
         "batch_size": args.batch_size,
+        "t_sampling": args.t_sampling,
+        "t_shift": args.t_shift,
         "per_sample_chunk_size": args.per_sample_chunk_size,
         "microbatch_size": args.microbatch_size,
         "train_config": asdict(train_cfg),
@@ -486,7 +512,7 @@ def run_experiment(args: argparse.Namespace):
             generator = torch.Generator(device=device)
             generator.manual_seed(args.seed + 1000)
             for step in range(1, args.steps + 1):
-                batch = make_batch(x0_all, train_cfg, generator, device)
+                batch = make_gns_batch(x0_all, train_cfg, generator, device, args.t_sampling, args.t_shift)
                 with torch.no_grad():
                     loss_value = float(batch_loss(model, batch, mode, train_cfg.t_min).detach().cpu())
                 opt.zero_grad(set_to_none=True)
@@ -551,6 +577,8 @@ def build_argparser():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--steps", type=int, default=100)
     p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--t-sampling", choices=["sigmoid_normal", "logit_normal_shift", "log_normal_shift", "uniform"], default="sigmoid_normal")
+    p.add_argument("--t-shift", type=float, default=0.0)
     p.add_argument("--per-sample-chunk-size", type=int, default=4)
     p.add_argument("--estimator", choices=["exact", "microbatch"], default="exact")
     p.add_argument("--microbatch-size", type=int, default=32)
