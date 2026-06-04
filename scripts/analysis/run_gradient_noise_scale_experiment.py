@@ -197,6 +197,67 @@ def set_model_grads_from_mean(model: nn.Module, mean_grad: dict[str, torch.Tenso
         param.grad = mean_grad[name].detach().clone()
 
 
+def microbatch_grad_stats(
+    model: nn.Module,
+    batch,
+    mode: str,
+    t_min: float,
+    microbatch_size: int,
+    eps_denom: float,
+) -> tuple[dict[str, torch.Tensor], dict[str, float]]:
+    """Estimate sample-level GNS from gradients of equal-size microbatches.
+
+    If a microbatch gradient is the average of m independent sample gradients,
+    then Cov(g_microbatch) = Cov(g_sample) / m. We estimate the covariance
+    trace across microbatch gradients and multiply by m to recover the
+    sample-level covariance trace. This is much cheaper than exact per-sample
+    gradients for compute-heavy models.
+    """
+    x0, eps, t, z_t = batch
+    batch_size = x0.shape[0]
+    if batch_size % microbatch_size != 0:
+        raise ValueError(f"batch_size={batch_size} must be divisible by microbatch_size={microbatch_size}")
+    params_tuple = tuple(model.parameters())
+    param_names = [name for name, _ in model.named_parameters()]
+    sum_grad = {name: torch.zeros_like(param) for name, param in zip(param_names, params_tuple)}
+    sum_micro_grad_norm_sq = torch.zeros((), device=x0.device, dtype=x0.dtype)
+    n_micro = batch_size // microbatch_size
+
+    for start in range(0, batch_size, microbatch_size):
+        end = start + microbatch_size
+        micro_batch = (x0[start:end], eps[start:end], t[start:end], z_t[start:end])
+        loss = batch_loss(model, micro_batch, mode, t_min)
+        grads = torch.autograd.grad(loss, params_tuple, retain_graph=False, create_graph=False)
+        micro_norm_sq = torch.zeros((), device=x0.device, dtype=x0.dtype)
+        for name, g in zip(param_names, grads):
+            sum_grad[name].add_(g)
+            micro_norm_sq = micro_norm_sq + torch.sum(g * g)
+        sum_micro_grad_norm_sq = sum_micro_grad_norm_sq + micro_norm_sq
+        del grads
+
+    mean_grad = {name: value / float(n_micro) for name, value in sum_grad.items()}
+    mean_grad_norm_sq = tree_norm_sq(mean_grad)
+    mean_micro_grad_norm_sq = sum_micro_grad_norm_sq / float(n_micro)
+    if n_micro > 1:
+        micro_cov_trace = (float(n_micro) / float(n_micro - 1)) * (mean_micro_grad_norm_sq - mean_grad_norm_sq)
+    else:
+        micro_cov_trace = torch.zeros_like(mean_grad_norm_sq)
+    micro_cov_trace = torch.clamp(micro_cov_trace, min=0.0)
+    cov_trace = float(microbatch_size) * micro_cov_trace
+    gns = cov_trace / (mean_grad_norm_sq + eps_denom)
+    stats = {
+        "mean_grad_norm_sq": float(mean_grad_norm_sq.detach().cpu()),
+        "mean_grad_norm": float(torch.sqrt(mean_grad_norm_sq).detach().cpu()),
+        "mean_sample_grad_norm_sq": float("nan"),
+        "cov_trace": float(cov_trace.detach().cpu()),
+        "gradient_noise_scale": float(gns.detach().cpu()),
+        "microbatch_cov_trace": float(micro_cov_trace.detach().cpu()),
+        "microbatch_size": float(microbatch_size),
+        "num_microbatches": float(n_micro),
+    }
+    return mean_grad, stats
+
+
 def build_model(model_name: str, args: argparse.Namespace) -> tuple[nn.Module, dict[str, Any]]:
     if model_name == "fcn":
         cfg = TorchFCNConfig(
@@ -327,8 +388,10 @@ def run_experiment(args: argparse.Namespace):
         "modes": list(modes),
         "device": str(device),
         "metric": "tr(per-sample gradient covariance) / ||mean per-sample gradient||^2",
+        "estimator": args.estimator,
         "batch_size": args.batch_size,
         "per_sample_chunk_size": args.per_sample_chunk_size,
+        "microbatch_size": args.microbatch_size,
         "train_config": asdict(train_cfg),
         "fcn_config": {
             "width": args.fcn_width,
@@ -373,14 +436,26 @@ def run_experiment(args: argparse.Namespace):
                 with torch.no_grad():
                     loss_value = float(batch_loss(model, batch, mode, train_cfg.t_min).detach().cpu())
                 opt.zero_grad(set_to_none=True)
-                mean_grad, stats = per_sample_grad_stats(
-                    model,
-                    batch,
-                    mode,
-                    train_cfg.t_min,
-                    args.per_sample_chunk_size,
-                    args.gns_eps,
-                )
+                if args.estimator == "exact":
+                    mean_grad, stats = per_sample_grad_stats(
+                        model,
+                        batch,
+                        mode,
+                        train_cfg.t_min,
+                        args.per_sample_chunk_size,
+                        args.gns_eps,
+                    )
+                elif args.estimator == "microbatch":
+                    mean_grad, stats = microbatch_grad_stats(
+                        model,
+                        batch,
+                        mode,
+                        train_cfg.t_min,
+                        args.microbatch_size,
+                        args.gns_eps,
+                    )
+                else:
+                    raise ValueError(f"unknown estimator: {args.estimator}")
                 set_model_grads_from_mean(model, mean_grad)
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip_norm)
                 clip_scale = min(1.0, train_cfg.grad_clip_norm / (float(grad_norm) + 1e-12))
@@ -423,6 +498,8 @@ def build_argparser():
     p.add_argument("--steps", type=int, default=100)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--per-sample-chunk-size", type=int, default=4)
+    p.add_argument("--estimator", choices=["exact", "microbatch"], default="exact")
+    p.add_argument("--microbatch-size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--grad-clip-norm", type=float, default=1.0)
     p.add_argument("--gns-eps", type=float, default=1e-12)
