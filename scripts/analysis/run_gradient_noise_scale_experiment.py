@@ -108,19 +108,46 @@ def loss_one_sample(
     z_t: torch.Tensor,
     mode: str,
     t_min: float,
+    loss_objective: str,
 ) -> torch.Tensor:
     raw = functional_call(model, (params, buffers), (z_t.unsqueeze(0), t.unsqueeze(0))).squeeze(0)
-    v_target = eps - x0
-    v_pred = pred_to_velocity_torch(raw.unsqueeze(0), z_t.unsqueeze(0), t.unsqueeze(0), mode, t_min).squeeze(0)
-    return torch.mean((v_pred - v_target) ** 2)
+    if loss_objective == "velocity":
+        target = eps - x0
+        pred = pred_to_velocity_torch(raw.unsqueeze(0), z_t.unsqueeze(0), t.unsqueeze(0), mode, t_min).squeeze(0)
+    elif loss_objective == "native":
+        if mode == "x":
+            target = x0
+        elif mode == "v":
+            target = eps - x0
+        elif mode == "eps":
+            target = eps
+        else:
+            raise ValueError(mode)
+        pred = raw
+    else:
+        raise ValueError(f"unknown loss_objective: {loss_objective}")
+    return torch.mean((pred - target) ** 2)
 
 
-def batch_loss(model: nn.Module, batch, mode: str, t_min: float) -> torch.Tensor:
+def batch_loss(model: nn.Module, batch, mode: str, t_min: float, loss_objective: str) -> torch.Tensor:
     x0, eps, t, z_t = batch
     raw = model(z_t, t)
-    v_target = eps - x0
-    v_pred = pred_to_velocity_torch(raw, z_t, t, mode, t_min)
-    return F.mse_loss(v_pred, v_target)
+    if loss_objective == "velocity":
+        target = eps - x0
+        pred = pred_to_velocity_torch(raw, z_t, t, mode, t_min)
+    elif loss_objective == "native":
+        if mode == "x":
+            target = x0
+        elif mode == "v":
+            target = eps - x0
+        elif mode == "eps":
+            target = eps
+        else:
+            raise ValueError(mode)
+        pred = raw
+    else:
+        raise ValueError(f"unknown loss_objective: {loss_objective}")
+    return F.mse_loss(pred, target)
 
 
 def make_gns_batch(
@@ -173,6 +200,7 @@ def per_sample_grad_stats(
     t_min: float,
     chunk_size: int,
     eps_denom: float,
+    loss_objective: str,
 ) -> tuple[dict[str, torch.Tensor], dict[str, float]]:
     params = dict(model.named_parameters())
     buffers = dict(model.named_buffers())
@@ -196,6 +224,7 @@ def per_sample_grad_stats(
             z_t[start:end],
             mode,
             t_min,
+            loss_objective,
         )
         for name, g in grads.items():
             sum_grad[name].add_(g.sum(dim=0))
@@ -233,6 +262,7 @@ def microbatch_grad_stats(
     t_min: float,
     microbatch_size: int,
     eps_denom: float,
+    loss_objective: str,
 ) -> tuple[dict[str, torch.Tensor], dict[str, float]]:
     """Estimate sample-level GNS from gradients of equal-size microbatches.
 
@@ -255,7 +285,7 @@ def microbatch_grad_stats(
     for start in range(0, batch_size, microbatch_size):
         end = start + microbatch_size
         micro_batch = (x0[start:end], eps[start:end], t[start:end], z_t[start:end])
-        loss = batch_loss(model, micro_batch, mode, t_min)
+        loss = batch_loss(model, micro_batch, mode, t_min, loss_objective)
         grads = torch.autograd.grad(loss, params_tuple, retain_graph=False, create_graph=False)
         micro_norm_sq = torch.zeros((), device=x0.device, dtype=x0.dtype)
         for name, g in zip(param_names, grads):
@@ -451,6 +481,7 @@ def run_experiment(args: argparse.Namespace):
         "batch_size": args.batch_size,
         "t_sampling": args.t_sampling,
         "t_shift": args.t_shift,
+        "loss_objective": args.loss_objective,
         "per_sample_chunk_size": args.per_sample_chunk_size,
         "microbatch_size": args.microbatch_size,
         "train_config": asdict(train_cfg),
@@ -514,7 +545,7 @@ def run_experiment(args: argparse.Namespace):
             for step in range(1, args.steps + 1):
                 batch = make_gns_batch(x0_all, train_cfg, generator, device, args.t_sampling, args.t_shift)
                 with torch.no_grad():
-                    loss_value = float(batch_loss(model, batch, mode, train_cfg.t_min).detach().cpu())
+                    loss_value = float(batch_loss(model, batch, mode, train_cfg.t_min, args.loss_objective).detach().cpu())
                 opt.zero_grad(set_to_none=True)
                 if args.estimator == "exact":
                     mean_grad, stats = per_sample_grad_stats(
@@ -524,6 +555,7 @@ def run_experiment(args: argparse.Namespace):
                         train_cfg.t_min,
                         args.per_sample_chunk_size,
                         args.gns_eps,
+                        args.loss_objective,
                     )
                 elif args.estimator == "microbatch":
                     mean_grad, stats = microbatch_grad_stats(
@@ -533,6 +565,7 @@ def run_experiment(args: argparse.Namespace):
                         train_cfg.t_min,
                         args.microbatch_size,
                         args.gns_eps,
+                        args.loss_objective,
                     )
                 else:
                     raise ValueError(f"unknown estimator: {args.estimator}")
@@ -579,6 +612,7 @@ def build_argparser():
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--t-sampling", choices=["sigmoid_normal", "logit_normal_shift", "log_normal_shift", "uniform"], default="sigmoid_normal")
     p.add_argument("--t-shift", type=float, default=0.0)
+    p.add_argument("--loss-objective", choices=["velocity", "native"], default="velocity")
     p.add_argument("--per-sample-chunk-size", type=int, default=4)
     p.add_argument("--estimator", choices=["exact", "microbatch"], default="exact")
     p.add_argument("--microbatch-size", type=int, default=32)
