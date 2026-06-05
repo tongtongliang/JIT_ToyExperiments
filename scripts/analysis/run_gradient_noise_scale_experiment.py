@@ -94,6 +94,45 @@ class TinyAdaLNFCN(nn.Module):
         return self.output_proj(h)
 
 
+class AdaLNSingleFCNBlock(nn.Module):
+    """One residual nonlinear map: h <- h + alpha * sigma(W * AdaLN(h))."""
+
+    def __init__(self, width: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(width, elementwise_affine=False)
+        self.ada = nn.Linear(width, 3 * width)
+        self.linear = nn.Linear(width, width)
+        nn.init.zeros_(self.ada.weight)
+        nn.init.zeros_(self.ada.bias)
+
+    def forward(self, h: torch.Tensor, t_cond: torch.Tensor):
+        gamma, beta, alpha = self.ada(t_cond).chunk(3, dim=-1)
+        fanin = self.norm(h) * (1.0 + gamma) + beta
+        return h + alpha * F.relu(self.linear(fanin))
+
+
+class TinyAdaLNSingleFCN(nn.Module):
+    def __init__(self, cfg: TorchFCNConfig):
+        super().__init__()
+        self.cfg = cfg
+        self.time_mlp0 = nn.Linear(cfg.time_embed_dim, cfg.width)
+        self.time_mlp1 = nn.Linear(cfg.width, cfg.width)
+        self.input_proj = nn.Linear(cfg.ambient_dim, cfg.width)
+        self.blocks = nn.ModuleList([AdaLNSingleFCNBlock(cfg.width) for _ in range(cfg.depth)])
+        self.output_proj = nn.Linear(cfg.width, cfg.ambient_dim)
+        if cfg.zero_init_output:
+            nn.init.zeros_(self.output_proj.weight)
+            nn.init.zeros_(self.output_proj.bias)
+
+    def forward(self, z_t: torch.Tensor, t: torch.Tensor):
+        t_emb = sinusoidal_embedding(t, self.cfg.time_embed_dim)
+        t_cond = self.time_mlp1(F.silu(self.time_mlp0(t_emb)))
+        h = self.input_proj(z_t)
+        for block in self.blocks:
+            h = block(h, t_cond)
+        return self.output_proj(h)
+
+
 def parse_csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
@@ -210,7 +249,7 @@ def per_sample_grad_stats(
     sum_grad_norm_sq = torch.zeros((), device=x0.device, dtype=x0.dtype)
 
     grad_fn = grad(loss_one_sample)
-    vmap_grad_fn = vmap(grad_fn, in_dims=(None, None, None, 0, 0, 0, 0, None, None))
+    vmap_grad_fn = vmap(grad_fn, in_dims=(None, None, None, 0, 0, 0, 0, None, None, None))
 
     for start in range(0, batch_size, chunk_size):
         end = min(start + chunk_size, batch_size)
@@ -327,6 +366,15 @@ def build_model(model_name: str, args: argparse.Namespace) -> tuple[nn.Module, d
             zero_init_output=True,
         )
         return TinyAdaLNFCN(cfg), asdict(cfg)
+    if model_name == "fcn_single":
+        cfg = TorchFCNConfig(
+            ambient_dim=args.ambient_dim,
+            width=args.fcn_width,
+            depth=args.fcn_single_depth,
+            time_embed_dim=args.time_embed_dim,
+            zero_init_output=True,
+        )
+        return TinyAdaLNSingleFCN(cfg), asdict(cfg)
     if model_name == "mixer":
         cfg = TorchMixerConfig(
             ambient_dim=args.ambient_dim,
@@ -439,7 +487,7 @@ def run_experiment(args: argparse.Namespace):
 
     models = parse_csv(args.models)
     modes = parse_csv(args.modes)
-    invalid_models = sorted(set(models) - {"fcn", "mixer", "transformer", "unet"})
+    invalid_models = sorted(set(models) - {"fcn", "fcn_single", "mixer", "transformer", "unet"})
     invalid_modes = sorted(set(modes) - set(MODES))
     if invalid_models:
         raise ValueError(f"Unknown models: {invalid_models}")
@@ -489,6 +537,12 @@ def run_experiment(args: argparse.Namespace):
             "width": args.fcn_width,
             "depth": args.fcn_depth,
             "time_embed_dim": args.time_embed_dim,
+        },
+        "fcn_single_config": {
+            "width": args.fcn_width,
+            "depth": args.fcn_single_depth,
+            "time_embed_dim": args.time_embed_dim,
+            "block": "h + alpha * relu(W * AdaLN(h))",
         },
         "mixer_config": {
             "patch_size": args.mixer_patch_size,
@@ -602,7 +656,7 @@ def build_argparser():
     p = argparse.ArgumentParser(description="Measure per-sample gradient noise scale for toy diffusion prediction modes.")
     p.add_argument("--output-root", default="results/gradient_noise_scale")
     p.add_argument("--run-name", default=None)
-    p.add_argument("--models", default="fcn,mixer", help="Comma-separated subset/order of: fcn,mixer,transformer,unet")
+    p.add_argument("--models", default="fcn,mixer", help="Comma-separated subset/order of: fcn,fcn_single,mixer,transformer,unet")
     p.add_argument("--modes", default="x,v,eps", help="Comma-separated subset/order of: x,v,eps")
     p.add_argument("--ambient-dim", type=int, default=512)
     p.add_argument("--n-samples", type=int, default=8192)
@@ -624,6 +678,7 @@ def build_argparser():
     p.add_argument("--print-every", type=int, default=10)
     p.add_argument("--fcn-width", type=int, default=256)
     p.add_argument("--fcn-depth", type=int, default=5)
+    p.add_argument("--fcn-single-depth", type=int, default=10)
     p.add_argument("--time-embed-dim", type=int, default=256)
     p.add_argument("--mixer-patch-size", type=int, default=8)
     p.add_argument("--mixer-dim", type=int, default=128)
