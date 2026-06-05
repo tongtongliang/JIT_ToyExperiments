@@ -142,6 +142,8 @@ def ensure_sample_quality_metrics(
         radius = _self_nn_radius(train_eval, quantile=radius_quantile)
         for mode_idx, mode in enumerate(MODES):
             key = f"{mode}_2d" if space == "projected_2d" else f"{mode}_highd"
+            if key not in sample_npz:
+                continue
             metrics = _sample_quality_one(
                 train_eval,
                 sample_npz[key],
@@ -199,7 +201,9 @@ def ensure_sample_subspace_metrics(run_dir: str | Path, *, force: bool = False) 
     rows: list[dict[str, Any]] = []
     clouds = {"training_data": np.asarray(data_npz["x0"], dtype=np.float32)}
     for mode in MODES:
-        clouds[mode] = np.asarray(sample_npz[f"{mode}_highd"], dtype=np.float32)
+        key = f"{mode}_highd"
+        if key in sample_npz:
+            clouds[mode] = np.asarray(sample_npz[key], dtype=np.float32)
 
     for label, cloud in clouds.items():
         sample_basis = _top_pca_basis(cloud, k=2)
